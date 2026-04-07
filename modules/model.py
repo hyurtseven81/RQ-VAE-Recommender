@@ -3,11 +3,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from data.schemas import TokenizedSeqBatch
-from typing import NamedTuple, Optional
+from typing import List, NamedTuple, Optional
 from torch import Tensor
 from transformers import T5EncoderModel
 from transformers.models.t5.modeling_t5 import T5Config, T5Stack
 from transformers.cache_utils import DynamicCache, EncoderDecoderCache
+
+from modules.decoding.base import BeamSearchStrategy
 
 torch.set_float32_matmul_precision("high")
 
@@ -298,20 +300,42 @@ class EncoderDecoderRetrievalModel(nn.Module):
         return ModelOutput(loss=total_loss, logits=None, loss_d=torch.stack(loss_d))
 
     @torch.no_grad()
-    def generate(self, attention_mask, input_ids, user_id=None):
+    def generate(
+        self,
+        attention_mask,
+        input_ids,
+        user_id=None,
+        strategy: Optional[BeamSearchStrategy] = None,
+        codebook_embs: Optional[List[Tensor]] = None,
+    ):
         """Generate top-k semantic IDs using sampling-based beam search.
 
-        For each hierarchy level, samples n_candidates tokens via multinomial,
-        scores them using cumulative log-probabilities with a float("-inf") mask for
-        invalid SID prefixes, and keeps the top-k highest-scoring candidates.
+        For each hierarchy level, delegates candidate expansion to ``strategy``
+        (default: :class:`VanillaBeamSearch`, which is byte-for-byte equivalent to
+        the original inline logic).
+
+        Args:
+            attention_mask:  [B, seq_len]
+            input_ids:       [B, seq_len]
+            user_id:         Optional user ids for personalized encoding.
+            strategy:        Decoding strategy instance. Defaults to VanillaBeamSearch.
+            codebook_embs:   Optional list of L tensors [vocab, embed_dim] with the
+                             per-level codebook embedding tables. Required by strategies
+                             that use embedding-space diversity (e.g. DiverseBeamSearch
+                             with use_embedding_distance=True). When None, strategies
+                             that need it will raise NotImplementedError.
 
         Returns:
             generated_ids: [B, top_k, num_hierarchies]
             log_probas:    [B, top_k]
         """
+        if strategy is None:
+            from modules.decoding.vanilla import VanillaBeamSearch
+            strategy = VanillaBeamSearch()
+
         B = input_ids.size(0)
         k = self.top_k_for_generation
-        n_cands = min(64, self.num_embeddings_per_hierarchy)
+        n_cands = min(200, self.num_embeddings_per_hierarchy)
 
         enc_out, enc_mask = self.encoder_forward_pass(
             attention_mask=attention_mask,
@@ -322,7 +346,7 @@ class EncoderDecoderRetrievalModel(nn.Module):
         rep_mask = enc_mask.repeat_interleave(k, dim=0)
 
         generated = None  # [B, k, h] grows with each hierarchy step
-        log_probas = 0
+        log_probas = torch.zeros(B, k, device=input_ids.device)
         past_kv = EncoderDecoderCache(DynamicCache(), DynamicCache())
 
         for h in range(self.num_hierarchies):
@@ -342,51 +366,22 @@ class EncoderDecoderRetrievalModel(nn.Module):
             )
 
             probas = F.softmax(self.decoder_mlp[h](dec_out[:, -1, :]), dim=-1)
-            samples = torch.multinomial(probas, num_samples=n_cands)
-            samp_log_p = torch.log(torch.gather(probas, 1, samples))
 
-            if generated is None:
-                is_valid = self._check_valid_prefix(samples.reshape(-1, 1)).reshape(
-                    B, n_cands
-                )
-                scores, idx = samp_log_p.masked_fill(~is_valid, float("-inf")).sort(
-                    -1, descending=True
-                )
-                top_k_idx = idx[:, :k]
-                generated = torch.gather(samples, 1, top_k_idx).unsqueeze(
-                    -1
-                )  # [B, k, 1]
-                log_probas = scores[:, :k]
+            generated, log_probas, parent_global_idx = strategy.expand(
+                beams=generated,
+                log_probas=log_probas,
+                probas=probas,
+                h=h,
+                n_cands=n_cands,
+                check_valid_fn=self._check_valid_prefix,
+                codebook_embs=codebook_embs,
+            )
+
+            if h == 0:
+                # Reset KV cache after first level (matches original behaviour)
                 past_kv = EncoderDecoderCache(DynamicCache(), DynamicCache())
             else:
-                prev = generated.reshape(-1, h).repeat_interleave(n_cands, dim=0)
-                prefix = torch.cat([prev, samples.reshape(-1, 1)], dim=1)
-                is_valid = self._check_valid_prefix(prefix).reshape(B, k * n_cands)
-                scores, idx = (
-                    (
-                        samp_log_p.reshape(B, k * n_cands)
-                        + log_probas.repeat_interleave(n_cands, dim=1)
-                    )
-                    .masked_fill(~is_valid, float("-inf"))
-                    .sort(-1, descending=True)
-                )
-
-                top_k_idx = idx[:, :k]
-                parent_beam_idx = top_k_idx // n_cands
-                parent_global = (
-                    parent_beam_idx
-                    + torch.arange(B, device=parent_beam_idx.device).unsqueeze(1) * k
-                ).flatten()
-                past_kv.reorder_cache(parent_global)
-
-                parent_ids = torch.gather(
-                    generated, 1, parent_beam_idx.unsqueeze(-1).expand(-1, -1, h)
-                )
-                new_ids = torch.gather(
-                    samples.reshape(B, k * n_cands), 1, top_k_idx
-                ).unsqueeze(-1)
-                generated = torch.cat([parent_ids, new_ids], dim=-1)  # [B, k, h+1]
-                log_probas = scores[:, :k]
+                past_kv.reorder_cache(parent_global_idx)
 
         return generated, log_probas
 
@@ -396,6 +391,8 @@ class EncoderDecoderRetrievalModel(nn.Module):
         batch: TokenizedSeqBatch,
         top_k: bool = True,
         temperature: int = 1,
+        strategy: Optional[BeamSearchStrategy] = None,
+        codebook_embs: Optional[List[Tensor]] = None,
     ) -> GenerationOutput:
         sem_ids_dim = self.num_hierarchies + 1
         input_ids = _strip_dedup_col(batch.sem_ids, sem_ids_dim, self.num_hierarchies)
@@ -406,5 +403,7 @@ class EncoderDecoderRetrievalModel(nn.Module):
             attention_mask=attention_mask,
             input_ids=input_ids,
             user_id=batch.user_ids,
+            strategy=strategy,
+            codebook_embs=codebook_embs,
         )
         return GenerationOutput(sem_ids=generated_ids, log_probas=log_probas)
