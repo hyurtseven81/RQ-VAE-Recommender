@@ -20,6 +20,134 @@ from huggingface_hub import login
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from typing import Optional
+
+
+def _setup_training(
+    dataset_folder: str,
+    dataset,
+    force_dataset_process: bool,
+    dataset_split: str,
+    batch_size: int,
+    vae_input_dim: int,
+    vae_hidden_dims: list,
+    vae_embed_dim: int,
+    vae_codebook_size: int,
+    vae_n_layers: int,
+    vae_n_cat_feats: int,
+    vae_codebook_normalize: bool,
+    vae_sim_vq: bool,
+    pretrained_rqvae_path: Optional[str],
+    t5_d_model: int,
+    t5_num_heads: int,
+    t5_d_ff: int,
+    t5_num_layers: int,
+    top_k_for_generation: int,
+    should_add_sep_token: bool,
+    num_user_bins: Optional[int],
+    learning_rate: float,
+    weight_decay: float,
+    accelerator: Accelerator,
+    train_data_subsample: bool = True,
+    pretrained_decoder_path: Optional[str] = None,
+):
+    """Shared setup: datasets, tokenizer, model, optimizer, lr_scheduler.
+
+    Returns a dict with keys:
+        item_dataset, train_dataloader, eval_dataloader, tokenizer, model,
+        optimizer, lr_scheduler, start_iter, device
+    """
+    device = accelerator.device
+
+    item_dataset = ItemData(
+        root=dataset_folder,
+        dataset=dataset,
+        force_process=force_dataset_process,
+        split=dataset_split,
+    )
+    train_dataset = SeqData(
+        root=dataset_folder,
+        dataset=dataset,
+        is_train=True,
+        subsample=train_data_subsample,
+        split=dataset_split,
+    )
+    eval_dataset = SeqData(
+        root=dataset_folder,
+        dataset=dataset,
+        is_train=False,
+        subsample=False,
+        split=dataset_split,
+    )
+
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_dataloader = cycle(train_dataloader)
+    eval_dataloader = DataLoader(eval_dataset, batch_size=batch_size, shuffle=True)
+
+    train_dataloader, eval_dataloader = accelerator.prepare(
+        train_dataloader, eval_dataloader
+    )
+
+    tokenizer = SemanticIdTokenizer(
+        input_dim=vae_input_dim,
+        hidden_dims=vae_hidden_dims,
+        output_dim=vae_embed_dim,
+        codebook_size=vae_codebook_size,
+        n_layers=vae_n_layers,
+        n_cat_feats=vae_n_cat_feats,
+        rqvae_weights_path=pretrained_rqvae_path,
+        rqvae_codebook_normalize=vae_codebook_normalize,
+        rqvae_sim_vq=vae_sim_vq,
+    )
+    tokenizer = accelerator.prepare(tokenizer)
+    tokenizer.precompute_corpus_ids(item_dataset)
+
+    codebooks = tokenizer.cached_ids[:, :vae_n_layers].cpu()
+
+    model = EncoderDecoderRetrievalModel(
+        codebooks=codebooks,
+        num_hierarchies=vae_n_layers,
+        num_embeddings_per_hierarchy=vae_codebook_size,
+        t5_d_model=t5_d_model,
+        t5_num_heads=t5_num_heads,
+        t5_d_ff=t5_d_ff,
+        t5_num_layers=t5_num_layers,
+        top_k_for_generation=top_k_for_generation,
+        should_add_sep_token=should_add_sep_token,
+        num_user_bins=num_user_bins,
+    )
+    model = torch.compile(model)
+
+    optimizer = AdamW(
+        params=model.parameters(), lr=learning_rate, weight_decay=weight_decay
+    )
+
+    lr_scheduler = InverseSquareRootScheduler(optimizer=optimizer, warmup_steps=10000)
+
+    start_iter = 0
+    if pretrained_decoder_path is not None:
+        checkpoint = torch.load(
+            pretrained_decoder_path, map_location=device, weights_only=False
+        )
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        if "scheduler" in checkpoint:
+            lr_scheduler.load_state_dict(checkpoint["scheduler"])
+        start_iter = checkpoint["iter"] + 1
+
+    model, optimizer, lr_scheduler = accelerator.prepare(model, optimizer, lr_scheduler)
+
+    return dict(
+        item_dataset=item_dataset,
+        train_dataloader=train_dataloader,
+        eval_dataloader=eval_dataloader,
+        tokenizer=tokenizer,
+        model=model,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        start_iter=start_iter,
+        device=device,
+    )
 
 
 @gin.configurable
@@ -75,65 +203,25 @@ def train(
         mixed_precision=mixed_precision_type if amp else "no",
     )
 
-    device = accelerator.device
-
     if wandb_logging and accelerator.is_main_process:
         wandb.login()
         run = wandb.init(project="gen-retrieval-decoder-training", config=params)
 
-    item_dataset = ItemData(
-        root=dataset_folder,
+    setup = _setup_training(
+        dataset_folder=dataset_folder,
         dataset=dataset,
-        force_process=force_dataset_process,
-        split=dataset_split,
-    )
-    train_dataset = SeqData(
-        root=dataset_folder,
-        dataset=dataset,
-        is_train=True,
-        subsample=train_data_subsample,
-        split=dataset_split,
-    )
-    eval_dataset = SeqData(
-        root=dataset_folder,
-        dataset=dataset,
-        is_train=False,
-        subsample=False,
-        split=dataset_split,
-    )
-
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    train_dataloader = cycle(train_dataloader)
-    eval_dataloader = DataLoader(eval_dataset, batch_size=batch_size, shuffle=True)
-
-    train_dataloader, eval_dataloader = accelerator.prepare(
-        train_dataloader, eval_dataloader
-    )
-
-    tokenizer = SemanticIdTokenizer(
-        input_dim=vae_input_dim,
-        hidden_dims=vae_hidden_dims,
-        output_dim=vae_embed_dim,
-        codebook_size=vae_codebook_size,
-        n_layers=vae_n_layers,
-        n_cat_feats=vae_n_cat_feats,
-        rqvae_weights_path=pretrained_rqvae_path,
-        rqvae_codebook_normalize=vae_codebook_normalize,
-        rqvae_sim_vq=vae_sim_vq,
-    )
-    tokenizer = accelerator.prepare(tokenizer)
-    tokenizer.precompute_corpus_ids(item_dataset)
-
-    if push_vae_to_hf:
-        login()
-        tokenizer.rq_vae.push_to_hub(vae_hf_model_name)
-
-    codebooks = tokenizer.cached_ids[:, :vae_n_layers].cpu()
-
-    model = EncoderDecoderRetrievalModel(
-        codebooks=codebooks,
-        num_hierarchies=vae_n_layers,
-        num_embeddings_per_hierarchy=vae_codebook_size,
+        force_dataset_process=force_dataset_process,
+        dataset_split=dataset_split,
+        batch_size=batch_size,
+        vae_input_dim=vae_input_dim,
+        vae_hidden_dims=vae_hidden_dims,
+        vae_embed_dim=vae_embed_dim,
+        vae_codebook_size=vae_codebook_size,
+        vae_n_layers=vae_n_layers,
+        vae_n_cat_feats=vae_n_cat_feats,
+        vae_codebook_normalize=vae_codebook_normalize,
+        vae_sim_vq=vae_sim_vq,
+        pretrained_rqvae_path=pretrained_rqvae_path,
         t5_d_model=t5_d_model,
         t5_num_heads=t5_num_heads,
         t5_d_ff=t5_d_ff,
@@ -141,27 +229,25 @@ def train(
         top_k_for_generation=top_k_for_generation,
         should_add_sep_token=should_add_sep_token,
         num_user_bins=num_user_bins,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        accelerator=accelerator,
+        train_data_subsample=train_data_subsample,
+        pretrained_decoder_path=pretrained_decoder_path,
     )
-    model = torch.compile(model)
 
-    optimizer = AdamW(
-        params=model.parameters(), lr=learning_rate, weight_decay=weight_decay
-    )
+    train_dataloader = setup["train_dataloader"]
+    eval_dataloader = setup["eval_dataloader"]
+    tokenizer = setup["tokenizer"]
+    model = setup["model"]
+    optimizer = setup["optimizer"]
+    lr_scheduler = setup["lr_scheduler"]
+    start_iter = setup["start_iter"]
+    device = setup["device"]
 
-    lr_scheduler = InverseSquareRootScheduler(optimizer=optimizer, warmup_steps=10000)
-
-    start_iter = 0
-    if pretrained_decoder_path is not None:
-        checkpoint = torch.load(
-            pretrained_decoder_path, map_location=device, weights_only=False
-        )
-        model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        if "scheduler" in checkpoint:
-            lr_scheduler.load_state_dict(checkpoint["scheduler"])
-        start_iter = checkpoint["iter"] + 1
-
-    model, optimizer, lr_scheduler = accelerator.prepare(model, optimizer, lr_scheduler)
+    if push_vae_to_hf:
+        login()
+        tokenizer.rq_vae.push_to_hub(vae_hf_model_name)
 
     metrics_accumulator = TopKAccumulator(ks=top_k_eval_list)
     num_params = sum(p.numel() for p in model.parameters())
