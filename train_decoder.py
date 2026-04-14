@@ -193,7 +193,7 @@ def train(
     num_user_bins=None,
     top_k_eval_list=[1, 5, 10],
 ):
-    if dataset not in (RecDataset.AMAZON, RecDataset.STEAM):
+    if dataset not in (RecDataset.AMAZON, RecDataset.STEAM, RecDataset.ML_32M):
         raise Exception(f"Dataset currently not supported: {dataset}.")
 
     if wandb_logging:
