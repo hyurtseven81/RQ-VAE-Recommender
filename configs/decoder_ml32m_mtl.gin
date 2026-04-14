@@ -1,0 +1,32 @@
+import data.processed
+
+train_mtl.iterations=100000
+train_mtl.learning_rate=0.001
+train_mtl.weight_decay=0.0001
+train_mtl.batch_size=64
+train_mtl.vae_input_dim=768
+train_mtl.vae_hidden_dims=[512, 256, 128]
+train_mtl.vae_embed_dim=64
+train_mtl.vae_n_cat_feats=0
+train_mtl.vae_codebook_size=256
+train_mtl.vae_n_layers=3
+train_mtl.wandb_logging=True
+train_mtl.pretrained_rqvae_path="trained_models/rqvae_ml32m/checkpoint_high_entropy.pt"
+train_mtl.save_dir_root="out/decoder_mtl/ml32m/"
+train_mtl.dataset_folder="dataset/ml-32m"
+train_mtl.dataset=%data.processed.RecDataset.ML_32M
+train_mtl.force_dataset_process=False
+train_mtl.full_eval_every=5000
+train_mtl.partial_eval_every=5000
+train_mtl.dataset_split="beauty"
+train_mtl.t5_d_model=384
+train_mtl.t5_num_heads=6
+train_mtl.t5_d_ff=1024
+train_mtl.t5_num_layers=8
+train_mtl.top_k_for_generation=10
+train_mtl.should_add_sep_token=True
+train_mtl.lambda_aux_max=0.2
+train_mtl.lambda_aux_warmup_fraction=0.1
+train_mtl.sasrec_n_negatives=1024
+train_mtl.sasrec_temperature=0.05
+train_mtl.grad_clip_norm=1.0

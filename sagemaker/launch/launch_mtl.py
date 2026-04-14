@@ -14,13 +14,15 @@ import sagemaker
 from sagemaker.pytorch import PyTorch
 
 
-DATASETS = ["beauty", "sports", "toys", "steam"]
+DATASETS = ["beauty", "sports", "toys", "steam", "ml32m"]
 S3_BASE = "s3://REDACTED-BUCKET/rqvae-level-aware"
 
 
 def _gin_config(dataset: str) -> str:
     if dataset == "steam":
         return "configs/decoder_steam_mtl.gin"
+    if dataset == "ml32m":
+        return "configs/decoder_ml32m_mtl.gin"
     return f"configs/decoder_amazon_{dataset}_mtl.gin"
 
 
