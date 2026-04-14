@@ -1,0 +1,9 @@
+FROM 763104351884.dkr.ecr.us-east-1.amazonaws.com/pytorch-inference:2.5.1-gpu-py310-cu124-ubuntu22.04-sagemaker
+
+WORKDIR /opt/ml/code
+COPY requirements.txt pyproject.toml ./
+RUN pip install --upgrade pip && \
+    pip install torch>=2.5.1 gin_config transformers accelerate scipy optuna pyarrow pandas matplotlib seaborn
+
+COPY . .
+ENV PYTHONPATH=/opt/ml/code

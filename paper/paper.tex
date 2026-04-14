@@ -1,0 +1,40 @@
+\documentclass[sigconf,review]{acmart}
+
+\usepackage{tikz}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{subcaption}
+
+\acmConference[CIKM '26]{ACM International Conference on Information and Knowledge Management}{October 2026}{Atlanta, GA, USA}
+
+\begin{document}
+
+\title{Level-Aware Hybrid Decoding for Generative Retrieval:\\
+Mixing Dense and Autoregressive Scores at Each Codebook Level}
+
+\author{Huseyin Yurtseven}
+\email{YOUR_S3_BUCKETeven@amazon.com}
+\affiliation{\institution{Amazon}}
+
+\begin{abstract}
+Generative retrieval via semantic IDs (TIGER-family models) uses beam search borrowed from machine translation, ignoring two structural priors specific to recommendation: (1) item scores should integrate collaborative-filtering signal, not just language model probability; and (2) residual vector quantization (RQ-VAE) tokenizes items coarse-to-fine, so the informativeness of each codebook level decreases with depth. Existing hybrid methods (LIGER, COBRA) address the first prior by fusing dense scores \emph{after} full-item generation, missing the second prior entirely. We introduce \emph{level-aware hybrid decoding}, a general inference framework that mixes per-codebook-level dense and autoregressive scores during beam expansion. At each codebook level $l$, we mix the autoregressive log-probability with a SASRec-style dense score computed against the partial RQ reconstruction $\sum_{i \le l} e_{c_i}$, weighted by a level-dependent mixing coefficient $\alpha_l$. We motivate the schedule with a residual entropy analysis showing that residual norms decrease monotonically with depth; optimal $\alpha_l$ should therefore be highest at coarse levels where dense guidance is most informative. We evaluate on Amazon Beauty, Sports, Toys, and Steam across vanilla TIGER, LIGER (cited), and our variants (codebook-aware DBS, Gumbel top-k, per-level mixing). Our method achieves statistically significant improvements in Recall@10 over both baselines on three of four datasets.
+\end{abstract}
+
+\maketitle
+
+\input{sections/intro}
+\input{sections/related_work}
+\input{sections/method}
+\input{sections/experiments}
+\input{sections/analysis}
+\input{sections/conclusion}
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+
+\end{document}

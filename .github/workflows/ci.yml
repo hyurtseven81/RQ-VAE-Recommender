@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, "feat/**"]
+  pull_request:
+    branches: [develop, main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install ruff
+      - run: ruff check modules/decoding modules/heads modules/analysis evaluate data scripts --ignore E501
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install mypy
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: mypy modules/decoding modules/heads modules/analysis evaluate/metrics.py evaluate/stats.py evaluate/result_store.py --ignore-missing-imports
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install dependencies
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install scipy pyarrow pandas pytest pytest-cov gin-config transformers
+          pip install -e ".[dev,experiments]" || pip install pytest pytest-cov scipy pyarrow pandas
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ \
+            --cov=modules/decoding \
+            --cov=modules/heads \
+            --cov=modules/analysis \
+            --cov=evaluate \
+            --cov-report=term-missing \
+            --cov-fail-under=80 \
+            -v

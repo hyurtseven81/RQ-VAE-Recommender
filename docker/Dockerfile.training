@@ -1,0 +1,15 @@
+FROM 763104351884.dkr.ecr.us-east-1.amazonaws.com/pytorch-training:2.5.1-gpu-py310-cu124-ubuntu22.04-sagemaker
+
+WORKDIR /opt/ml/code
+
+# Install repo dependencies
+COPY requirements.txt pyproject.toml ./
+RUN pip install --upgrade pip && \
+    pip install -r requirements.txt && \
+    pip install scipy>=1.13 optuna>=3.6 pyarrow>=16.0 pandas>=2.0 \
+                matplotlib>=3.9 seaborn>=0.13
+
+# Copy source
+COPY . .
+
+ENV PYTHONPATH=/opt/ml/code

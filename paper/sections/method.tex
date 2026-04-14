@@ -1,0 +1,70 @@
+\section{Method}
+\label{sec:method}
+
+\subsection{Preliminaries: TIGER and RQ-VAE Tokenization}
+
+We build on TIGER~\cite{rajput2023tiger}. An RQ-VAE maps each item $i$ to a semantic ID tuple $(c_0, c_1, \ldots, c_{L-1})$ via recursive quantization: the encoder output $z = f_\theta(x_i)$ is quantized level by level, with each level encoding the residual of the previous. Formally, $e_{c_0} = \arg\min_{e \in \mathcal{C}_0} \|z - e\|$, and $r_l = z - \sum_{i < l} e_{c_i}$ is the residual after level $l-1$. A T5 decoder generates the next item's tuple token by token, conditioned on the encoder output for the user's history.
+
+\subsection{SASRec Auxiliary Head}
+\label{sec:sasrec-head}
+
+We add a SASRec-style dense head to the decoder. Given the decoder's final hidden state $h \in \mathbb{R}^d$ (sequence-final position after all $L$ SID tokens in teacher-forcing), the head computes a query vector:
+%
+\begin{equation}
+  q = W_2\,\mathrm{GELU}(W_1\,\mathrm{LayerNorm}(h)) \in \mathbb{R}^{d_\text{item}}
+\end{equation}
+%
+with $d_\text{item} = 32$ (matching the RQ-VAE embedding dimension). An item embedding table $\mathbf{E} \in \mathbb{R}^{|\mathcal{I}| \times 32}$ is initialized from RQ-VAE encoder outputs ($z_i = f_\theta(x_i)$ for each item $i$) and learned jointly during multi-task training.
+
+\textbf{Distinction from LIGER.} LIGER projects the decoder hidden state to frozen Sentence-T5 text embeddings (768-d, content signal, never updated). Our head projects to a learned 32-d item embedding table initialized from the RQ-VAE encoder (collaborative signal, updated during MTL training). The signal source (behavioral vs.\ content) and dimensionality both differ.
+
+\subsection{Multi-Task Training}
+
+We train with a joint objective:
+%
+\begin{equation}
+  \mathcal{L} = \mathcal{L}_{\text{SID}} + \lambda(t)\,\mathcal{L}_{\text{SASRec}}
+\end{equation}
+%
+where $\mathcal{L}_{\text{SID}}$ is the per-level next-token cross-entropy (unchanged from vanilla TIGER), $\mathcal{L}_{\text{SASRec}}$ is sampled-softmax InfoNCE with in-batch negatives and 1024 uniform random negatives, and $\lambda(t)$ linearly warms up from 0 to $\lambda_{\max} = 0.2$ over the first 10\% of training steps to prevent the auxiliary head from destabilizing early SID learning.
+
+\subsection{Decoding Framework}
+\label{sec:decoding}
+
+We implement a unified decoding framework as an abstract \texttt{BeamSearchStrategy} interface. Each strategy implements \texttt{expand(beams, probas, level, check\_valid\_fn, codebook\_embs, decoder\_hidden)}, guaranteeing that the prefix validity constraint is always enforced.
+
+\textbf{Codebook-aware DBS.} We extend Diverse Beam Search~\cite{vijayakumar2016dbs} with a diversity penalty in codebook embedding space. For group $g$, the penalty for candidate token $c$ at level $l$ is:
+%
+\begin{equation}
+  \text{penalty}(c) = \lambda_l \sum_{g' < g} \min_{c' \in \mathcal{G}_{g'}} \|e_c^{(l)} - e_{c'}^{(l)}\|_2
+\end{equation}
+%
+where $e_c^{(l)} \in \mathbb{R}^{32}$ is the codebook $l$ embedding for token $c$. This differs from \citet{penha2024bridging} who use token-ID Hamming distance.
+
+\textbf{Gumbel top-$k$.} We implement Stochastic Beam Search~\cite{kool2019stochastic}: perturb log-probabilities with Gumbel noise before top-$k$ selection, using true log-probs for cumulative scoring.
+
+\textbf{Hybrid.} Reserve $k_{\text{det}}$ deterministic slots (vanilla) and $k_{\text{stoch}}$ stochastic slots (Gumbel). Deterministic slots protect NDCG@1; stochastic slots boost Recall@$K$.
+
+\subsection{Level-Aware Hybrid Decoding}
+
+The core contribution is \texttt{LevelAwareHybridDecoding}, a wrapper around any base strategy. At codebook level $l$, after the base strategy computes per-candidate log-probabilities but before validity masking:
+
+\begin{enumerate}
+  \item \textbf{Partial reconstruction.} For each candidate token $c$ at level $l$, compute $r_l^{\text{cand}} = \sum_{i < l} e_{c_i} + e_c^{(l)}$.
+  \item \textbf{Dense score.} $s_{\text{dense}}(c) = \langle q, r_l^{\text{cand}} \rangle$ where $q = \text{SASRecHead}(h)$ is computed once per beam.
+  \item \textbf{Normalize.} $z$-score both $\log p$ and $s_{\text{dense}}$ across the candidate set.
+  \item \textbf{Mix.} $\text{score}(c) = (1 - \alpha_l)\,\hat{p}_l + \alpha_l\,\hat{s}_l$.
+  \item Apply trie validity mask and top-$k$.
+\end{enumerate}
+
+This is the first method to use the \emph{partial RQ reconstruction} as a dense scoring signal during beam expansion, enabling dense guidance before item identity is fully determined.
+
+\subsection{Alpha Schedule}
+
+We evaluate two variants:
+
+\textbf{Grid search.} Coarse grid $\alpha_l \in \{0, 0.25, 0.5, 0.75, 1.0\}$ per level ($5^3 = 125$ configs for $L=3$), followed by Optuna TPE refinement (100 trials, $\pm 0.15$ around the coarse winner).
+
+\textbf{Learned.} $\alpha_l = \sigma(\phi_l)$ where $\phi \in \mathbb{R}^L$ is a trainable parameter. We freeze the decoder and auxiliary head, then optimize $\phi$ for one epoch on the training set.
+
+\textbf{Prior.} We predict $\alpha_0 \ge \alpha_1 \ge \alpha_2$ (monotone non-increasing). Residual norms decrease with depth, so the dense signal should dominate at coarse levels. We state this prediction before running experiments; if falsified, we analyze the deviation.

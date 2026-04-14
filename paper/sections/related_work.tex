@@ -1,0 +1,20 @@
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Generative Retrieval for Recommendation}
+
+TIGER~\cite{rajput2023tiger} introduced semantic IDs via RQ-VAE and a T5 seq2seq model trained on ID sequences, establishing the generative retrieval paradigm for recommendation. Subsequent work has explored codebook design (LETTER, CoST, LC-Rec), multi-task objectives (EAGER~\cite{wang2024eager}), and decoding strategies~\cite{penha2024bridging}. The GRID handbook~\cite{ju2025grid} surveys practical ablations on beam size, codebook granularity, and evaluation protocols.
+
+\subsection{Hybrid Generative-Dense Retrieval}
+
+Two concurrent works directly combine generative and dense retrieval. \textbf{LIGER}~\cite{yang2024liger} augments TIGER with a frozen Sentence-T5 embedding head. During inference, the SID beam search produces $K$ candidates, which are augmented with cold-start items and reranked by the dense head. \textbf{COBRA}~\cite{yang2025cobra} uses BeamFusion: sparse (autoregressive) and dense scores are fused after all codebook tokens are decoded, before final ranking. Both methods fuse scores \emph{post-generation}. Our method fuses at each codebook level \emph{during} beam expansion. Additionally, LIGER's dense head targets frozen text embeddings (content signal), while ours targets learned RQ-VAE encoder embeddings (collaborative signal).
+
+\textbf{GD-RIPOR}~\cite{zeng2024gdripor} uses dense scores to guide constrained beam search for document retrieval, but operates without residual quantization structure and applies no per-level weighting.
+
+\subsection{Decoding Strategies for Generative Retrieval}
+
+\citet{penha2024bridging} applied off-the-shelf Diverse Beam Search (DBS)~\cite{vijayakumar2016dbs} to TIGER-style recommendation, using a fixed diversity penalty. Our codebook-embedding-distance DBS computes diversity in the 32-dimensional embedding space of the current codebook level rather than over token IDs. Stochastic Beam Search (Gumbel top-$k$)~\cite{kool2019stochastic} has not previously been applied to recommendation generative retrieval.
+
+\subsection{Per-Level Treatment of Residual Quantization}
+
+Speech synthesis models using RQ-codecs treat codebook levels differently via architecture: VALL-E~\cite{wang2023valle} uses an AR model for level 1 and NAR for levels 2–8; AudioLM~\cite{borsos2023audiolm} trains separate transformers for semantic, coarse-acoustic, and fine-acoustic tokens; SoundStorm~\cite{borsos2023soundstorm} applies MaskGIT iterations proportional to level index. All approaches differ across levels at \emph{training time via architecture}. Our contribution is per-level treatment at \emph{inference time via score mixing}, which is unpublished across recommendation, IR, and speech.

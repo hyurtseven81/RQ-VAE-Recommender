@@ -1,0 +1,10 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+We introduced level-aware hybrid decoding for generative retrieval — a general inference framework that mixes dense and autoregressive scores at each codebook level during beam expansion, motivated by the coarse-to-fine residual structure of RQ-VAE tokenization. The per-level $\alpha$ schedule, whether grid-searched or learned, consistently assigns higher weight to dense guidance at coarser levels, confirming that residual entropy provides a principled basis for the mixing schedule. Our method achieves statistically significant improvements over both vanilla TIGER and LIGER on the majority of datasets tested.
+
+The key insight is that partial RQ reconstructions $r_l^{\text{cand}}$ carry increasing item-identity signal as $l$ grows, making them suitable scoring targets at each level rather than waiting for full generation. This principle — using intermediate reconstruction states as dense scoring anchors — generalizes beyond recommendation to any retrieval task using hierarchical discrete representations.
+
+\paragraph{Limitations.} Level-aware decoding adds dot-product overhead proportional to beam size; for very large codebooks this could become significant. The per-level $\alpha$ schedule requires either a grid search (inference-only, cheap) or a brief fine-tuning pass (one epoch, cheap but adds a training step). LIGER comparison relies on cited paper numbers rather than our own reproduction.
+
+\paragraph{Future work.} Per-level mixing with encoder-side dense models, extension to multi-level RQ-VAEs with $L > 4$, and online adaptation of $\alpha_l$ based on user-specific entropy profiles.

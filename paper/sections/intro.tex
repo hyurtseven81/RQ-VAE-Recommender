@@ -1,0 +1,27 @@
+\section{Introduction}
+\label{sec:intro}
+
+Generative retrieval for recommendation~\cite{rajput2023tiger} has established semantic IDs — tuples of discrete codebook indices from a residual vector quantizer (RQ-VAE) — as a powerful item representation. A transformer decoder trained on sequences of these IDs generates the next item's semantic ID tuple token by token, and beam search retrieves the top-$K$ items. This formulation enables end-to-end differentiable recommendation without a separate item index.
+
+However, two structural mismatches between recommendation and the machine translation setting from which beam search originates remain unaddressed:
+
+\textbf{(1) Collaborative signal.} Recommendation quality is driven by collaborative filtering — which items users with similar histories interact with — not by the language model's prior over semantic ID sequences. Existing hybrid methods~\cite{yang2024liger, yang2025cobra} address this by fusing a dense retrieval score with the beam score, but do so \emph{after full-item generation}: LIGER reranks the top-$K$ beams using a frozen text-embedding head; COBRA uses BeamFusion after all codebook tokens are decoded. Neither integrates the dense signal during beam expansion.
+
+\textbf{(2) Coarse-to-fine residual structure.} RQ-VAE tokenization is explicitly hierarchical: the first codebook captures the largest residual, and successive codebooks encode progressively smaller corrections. The residual norm $\|r_l\|$ decreases with depth $l$, meaning that early levels carry more item-discriminating information. Beam search applies the same autoregressive prior at every level, ignoring this structure.
+
+We introduce \textbf{level-aware hybrid decoding}, a general inference framework that addresses both gaps simultaneously. At each codebook level $l$, we mix the autoregressive log-probability $\log p(c_l \mid c_{<l}, \text{context})$ with a dense score from a SASRec-style auxiliary head, using a level-dependent weight $\alpha_l$:
+%
+\begin{equation}
+  \text{score}(c_l^{\text{cand}}) = (1 - \alpha_l)\,\hat{p}_l^{\text{AR}} + \alpha_l\,\hat{s}_l^{\text{dense}}
+  \label{eq:mixing}
+\end{equation}
+%
+where $\hat{p}_l^{\text{AR}}$ and $\hat{s}_l^{\text{dense}}$ are $z$-score normalized across candidates at level $l$, and the dense score uses the \emph{partial RQ reconstruction} $r_l^{\text{cand}} = \sum_{i < l} e_{c_i} + e_{c_l^{\text{cand}}}$ rather than a completed item embedding — enabling dense guidance before the item identity is fully determined.
+
+Our contributions are:
+\begin{itemize}
+  \item \textbf{Level-aware hybrid decoding} (§\ref{sec:method}): per-codebook-level $\alpha$ mixing during beam expansion, composable with any base decoding strategy.
+  \item \textbf{Codebook-aware diverse beam search} (§\ref{sec:decoding}): diversity penalty based on L2 distance in codebook embedding space, outperforming token-ID-based DBS.
+  \item \textbf{Residual entropy analysis} (§\ref{sec:analysis}): empirical evidence that residual norms and entropy decrease monotonically with codebook depth, motivating the $\alpha$ schedule.
+  \item \textbf{SASRec auxiliary head} (§\ref{sec:sasrec-head}): collaborative-signal dense head initialized from RQ-VAE encoder outputs, contrasted with LIGER's content-signal frozen text embeddings.
+\end{itemize}
