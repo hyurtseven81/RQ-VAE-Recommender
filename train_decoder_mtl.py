@@ -154,6 +154,9 @@ def train_mtl(
     item_dataset = setup["item_dataset"]
     # item_dataset.item_data is [num_items, feature_dim] — raw item features
     item_features = item_dataset.item_data.float()
+    # Truncate to vae_input_dim if features have extra dims (e.g. ML1M genre features)
+    if item_features.shape[-1] > vae_input_dim:
+        item_features = item_features[..., :vae_input_dim]
     num_items = len(item_features)
 
     # Use the unwrapped rqvae from the tokenizer (already loaded weights)
