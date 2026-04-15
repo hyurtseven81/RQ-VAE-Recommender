@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import torch
 from torch_geometric.data import HeteroData
@@ -56,6 +57,7 @@ class RawMovieLens1M(MovieLens1M, PreprocessingMixin):
         x = torch.cat([titles_emb, genres], axis=1)
 
         data["item"].x = x
+        data["item"].text = np.array(titles_text)
         gen = torch.Generator()
         gen.manual_seed(42)
         data["item"].is_train = torch.rand(x.shape[0], generator=gen) > 0.05
