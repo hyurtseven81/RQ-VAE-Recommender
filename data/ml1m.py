@@ -56,6 +56,9 @@ class RawMovieLens1M(MovieLens1M, PreprocessingMixin):
         x = torch.cat([titles_emb, genres], axis=1)
 
         data["item"].x = x
+        gen = torch.Generator()
+        gen.manual_seed(42)
+        data["item"].is_train = torch.rand(x.shape[0], generator=gen) > 0.05
         # Process user data:
         full_df = pd.read_csv(
             self.raw_paths[1],
