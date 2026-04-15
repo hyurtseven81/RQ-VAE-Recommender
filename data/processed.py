@@ -114,7 +114,10 @@ class SeqData(Dataset):
 
         split = "train" if is_train else "test"
         self.subsample = subsample
-        self.sequence_data = raw_data.data[("user", "rated", "item")]["history"][split]
+        history = raw_data.data[("user", "rated", "item")]["history"]
+        if split not in history and split == "test" and "eval" in history:
+            split = "eval"
+        self.sequence_data = history[split]
 
         if not self.subsample:
             self.sequence_data["itemId"] = torch.nn.utils.rnn.pad_sequence(
