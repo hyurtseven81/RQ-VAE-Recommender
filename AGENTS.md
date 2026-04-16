@@ -111,3 +111,15 @@ Known gaps: `tests/integration/` is empty, no `tests/data/test_steam_loader.py`.
 
 Strategies registered in `modules/decoding/__init__.py`:
 `vanilla`, `dbs`, `gumbel_topk`, `hybrid`, `level_aware_mix`, `level_aware_mix_grid`, `level_aware_mix_learned`, `sasrec_rerank`
+
+## Keeping this file up to date
+
+Update AGENTS.md whenever:
+- A training job completes or is dropped — update the checkpoint status table
+- A new dataset or config is added or removed
+- A dependency pin changes in `requirements.txt` (add to known issues if SageMaker-related)
+- A new decoding strategy is registered in `modules/decoding/__init__.py`
+- Pipeline stages change status (training → alpha search → eval → paper)
+- A new workaround or known issue is discovered
+
+The checkpoint status table and pipeline stages section are the most frequently stale — check them first.
