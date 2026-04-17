@@ -50,7 +50,7 @@ paper/                 — LaTeX source (CIKM 2026 submission)
 |---------|------------|------------------|
 | Beauty  | `trained_models/rqvae_amazon_beauty/checkpoint_399999.pt` | ✅ `s3://REDACTED-BUCKET/rqvae-level-aware/decoder-mtl/beauty/decoder-mtl-beauty-od-20260412-2036/output/model.tar.gz` |
 | Sports  | `trained_models/rqvae_amazon_sports/checkpoint_high_entropy.pt` | ✅ `s3://REDACTED-BUCKET/rqvae-level-aware/decoder-mtl/sports/decoder-mtl-sports-od4-20260415-1851/output/model.tar.gz` |
-| Steam   | `trained_models/rqvae_steam/checkpoint_399999.pt` | 🔄 `decoder-mtl-steam-od4-20260415-1851` (in progress, ~65% at 20h) |
+| Steam   | ⚠️ Likely RQ-VAE SID degeneracy (level-0 codebook min_dist=0.002, decoder SID loss→0 in 5 steps, eval metrics=1.0) — **dropped** | ❌ Decoder exhibits 100% recall which is a symptom of SID collapse — **dropped** |
 | Toys    | ⚠️ Codebook collapse (SID=0, all metrics=1.0) — **dropped** | — |
 | ML1M    | `trained_models/rqvae_ml1m/checkpoint_399999.pt` | ❌ Incompatible data pipeline (different feature dims, split structure, max_seq_len) — **dropped** |
 
@@ -58,7 +58,6 @@ paper/                 — LaTeX source (CIKM 2026 submission)
 
 - **Amazon Beauty**: ~22K users, ~12K items, auto-download
 - **Amazon Sports**: ~35K users, ~18K items, auto-download
-- **Steam**: ~334K users, ~13K items after 5-core filtering; downloads from HuggingFace mirror (`recommender-system/steam-review-and-bundle-dataset`)
 
 ## Data prep
 
@@ -90,7 +89,7 @@ Dropped due to pipeline incompatibilities: different feature dims (786 vs 768), 
 ## Pipeline stages (post-training)
 
 ```
-Decoder MTL complete (Beauty ✅, Sports ✅, Steam 🔄)
+Decoder MTL complete (Beauty ✅, Sports ✅)
   ├── Alpha grid search (per dataset) — scripts/alpha_grid_search.py
   ├── Alpha learned (per dataset) — scripts/train_alpha_params.py
   ├── Eval sweep (8 strategies × 3 datasets) — evaluate/run_eval.py
