@@ -298,7 +298,7 @@ def main() -> None:
 
     # Codebook embeddings for embedding-space strategies
     codebook_embs = [
-        tokenizer.rq_vae.vq.layers[i].embedding.weight.detach().to(device)
+        tokenizer.rq_vae.layers[i].embedding.weight.detach().to(device)
         for i in range(n_levels)
     ]
 
