@@ -233,7 +233,7 @@ def main() -> None:
     dataset_enum_map = {
         "beauty": RecDataset.AMAZON, "sports": RecDataset.AMAZON,
         "toys": RecDataset.AMAZON, "steam": RecDataset.STEAM,
-        "ml1m": RecDataset.ML1M, "ml32m": RecDataset.ML32M,
+        "ml1m": RecDataset.ML_1M, "ml32m": RecDataset.ML_32M,
     }
     dataset_enum = dataset_enum_map.get(args.dataset, RecDataset.AMAZON)
 
