@@ -308,6 +308,13 @@ def main() -> None:
     strategy = _build_strategy(args.strategy, args, aux_head, n_levels)
     print(f"Strategy: {args.strategy} → {type(strategy).__name__}")
 
+    if isinstance(strategy, SASRecReranker):
+        raise NotImplementedError(
+            "sasrec_rerank strategy is not currently wired into the eval harness "
+            "(requires decoder hidden-state access). Use level_aware_mix* variants "
+            "for SASRec-augmented decoding."
+        )
+
     # ------------------------------------------------------------------
     # Evaluation loop
     # ------------------------------------------------------------------
