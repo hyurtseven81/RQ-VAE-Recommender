@@ -375,6 +375,7 @@ class EncoderDecoderRetrievalModel(nn.Module):
                 n_cands=n_cands,
                 check_valid_fn=self._check_valid_prefix,
                 codebook_embs=codebook_embs,
+                decoder_hidden=dec_out[:, -1, :],
             )
 
             if h == 0:
