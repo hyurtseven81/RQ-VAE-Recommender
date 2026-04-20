@@ -83,7 +83,7 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
             input_dim=embed_dim,
             hidden_dims=hidden_dims[-1::-1],
             out_dim=input_dim,
-            normalize=False,
+            normalize=True,
         )
 
         self.reconstruction_loss = (
