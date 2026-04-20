@@ -22,14 +22,17 @@ import json
 import os
 from pathlib import Path
 
-import boto3
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
+
+# boto3 / pyarrow are heavy deps only needed inside main(). Lazy-importing
+# them keeps the pure DataFrame helpers testable in environments without
+# the full SageMaker stack installed.
 
 
 def download_results(bucket: str, prefix: str, local_dir: str) -> list[dict]:
     """Download all result JSONs from S3 and return as list of dicts."""
+    import boto3  # lazy: not needed for helper tests
+
     s3 = boto3.client("s3")
     results = []
     paginator = s3.get_paginator("list_objects_v2")
@@ -96,6 +99,9 @@ def per_user_to_dataframe(results: list[dict]) -> pd.DataFrame:
 
 
 def main():
+    import pyarrow as pa  # lazy: not needed for helper tests
+    import pyarrow.parquet as pq
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--bucket", default="REDACTED-BUCKET")
     parser.add_argument("--prefix", default="rqvae-level-aware")
