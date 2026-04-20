@@ -33,7 +33,17 @@ addopts = "--tb=short"
 
 [tool.coverage.run]
 source = ["modules", "evaluate", "data"]
-omit = ["tests/*", "sagemaker/*", "scripts/*", "paper/*", "evaluate/run_eval.py"]
+# Omit CLI entry points that require live infra (trained checkpoints,
+# real datasets, S3) to exercise meaningfully — they are smoke-tested
+# by running them end-to-end in SageMaker, not in unit tests.
+omit = [
+    "tests/*",
+    "sagemaker/*",
+    "scripts/*",
+    "paper/*",
+    "evaluate/run_eval.py",
+    "evaluate/validate_rqvae.py",
+]
 
 [tool.coverage.report]
 fail_under = 80
