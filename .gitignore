@@ -2,6 +2,6 @@ __pycache__
 dataset
 out
 wandb
-trained_models/transformer*
+trained_models/
 tl_out
 .venv/
