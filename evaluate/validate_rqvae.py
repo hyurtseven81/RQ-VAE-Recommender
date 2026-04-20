@@ -16,7 +16,7 @@ from pathlib import Path
 import gin
 import numpy as np
 import torch
-from torch.utils.data import BatchSampler, DataLoader, SequentialSampler
+from torch.utils.data import DataLoader
 
 from data.processed import ItemData
 from modules.rqvae import RqVae

@@ -142,8 +142,10 @@ def main():
     codebook_embs = [e.to(device) for e in codebook_embs]
 
     # Load dataset
-    from data.processed import SeqData, RecDataset as RecDS
     from torch.utils.data import DataLoader
+
+    from data.processed import RecDataset as RecDS
+    from data.processed import SeqData
 
     dataset_enum_map = {
         "beauty": RecDS.AMAZON, "sports": RecDS.AMAZON,

@@ -183,8 +183,10 @@ def main():
     optimizer = torch.optim.Adam(alpha_params.parameters(), lr=args.lr)
 
     # Load training data
-    from data.processed import SeqData, RecDataset as RecDS
     from torch.utils.data import DataLoader
+
+    from data.processed import RecDataset as RecDS
+    from data.processed import SeqData
 
     dataset_enum_map = {
         "beauty": RecDS.AMAZON, "sports": RecDS.AMAZON,
