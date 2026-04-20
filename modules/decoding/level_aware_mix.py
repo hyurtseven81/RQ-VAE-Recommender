@@ -26,9 +26,13 @@ class LevelAwareHybridDecoding(BeamSearchStrategy):
     1. Compute base strategy's log-probs (from probas arg)
     2. Compute partial RQ reconstruction r_h^cand = sum_{i<h} e_{c_i} + e_{c_h}^cand
     3. Compute dense score: s = <q, r_h^cand> where q = aux_head(decoder_hidden)
-    4. Z-score normalize both terms across candidates
-    5. Mix: score = (1 - alpha[h]) * norm_log_p + alpha[h] * norm_s_dense
-    6. Apply validity mask and top-k (delegated to base strategy)
+    4. Z-score both log_p and s to unit scale (unit-free alpha interpretation)
+    5. Mix in log-space: mixed = (1 - alpha[h]) * norm_log_p + alpha[h] * norm_s
+    6. Restore log-prob scale (multiply by log_p's std) so softmax preserves
+       the original sharpness. Without this rescale, softmax of unit-variance
+       scores collapses toward uniform.
+    7. Convert to probas via softmax and delegate to base strategy for
+       validity masking and top-k selection.
 
     Composability: wraps any base strategy (Vanilla, DBS, Gumbel, Hybrid).
     """
@@ -101,10 +105,7 @@ class LevelAwareHybridDecoding(BeamSearchStrategy):
             # s_dense: [B, vocab]
             s_dense = (q.unsqueeze(1) * r).sum(-1)  # [B, vocab]
 
-            norm_log_p = self._z_score(log_p, dim=-1)         # [B, vocab]
-            norm_s_dense = self._z_score(s_dense, dim=-1)     # [B, vocab]
-
-            mixed = (1.0 - a) * norm_log_p + a * norm_s_dense  # [B, vocab]
+            mixed = self._mix_logspace(log_p, s_dense, a)  # [B, vocab]
         else:
             # h>0: probas is [B*k, vocab], q is [B*k, d_item]
             # r is [B, k, vocab, d_item]
@@ -119,15 +120,14 @@ class LevelAwareHybridDecoding(BeamSearchStrategy):
             # log_p: [B*k, vocab] -> [B, k, vocab]
             log_p_bk = log_p.reshape(B, k, vocab)
 
-            norm_log_p = self._z_score(log_p_bk, dim=-1)       # [B, k, vocab]
-            norm_s_dense = self._z_score(s_dense, dim=-1)       # [B, k, vocab]
-
-            mixed = (1.0 - a) * norm_log_p + a * norm_s_dense  # [B, k, vocab]
+            mixed = self._mix_logspace(log_p_bk, s_dense, a)  # [B, k, vocab]
 
             # Flatten back to [B*k, vocab] for base strategy
             mixed = mixed.reshape(B * k, vocab)
 
-        # Convert mixed scores to a valid probability distribution
+        # Convert mixed logits to probas. Because _mix_logspace restores
+        # log_p's std, softmax here preserves the original distribution's
+        # sharpness (fixes audit bug B2: softmax-over-unit-variance).
         mixed_probas = torch.softmax(mixed, dim=-1)
 
         return self.base_strategy.expand(
@@ -176,6 +176,25 @@ class LevelAwareHybridDecoding(BeamSearchStrategy):
         mean = x.mean(dim=dim, keepdim=True)
         std = x.std(dim=dim, keepdim=True)
         return (x - mean) / (std + self.eps)
+
+    def _mix_logspace(self, log_p: Tensor, s_dense: Tensor, a: float) -> Tensor:
+        """Blend log_p and s_dense in log-space, preserving log_p's scale.
+
+        Algorithm:
+            norm_log_p = z_score(log_p)          # unit variance
+            norm_s     = z_score(s_dense)        # unit variance
+            mixed_z    = (1-a) * norm_log_p + a * norm_s
+            mixed      = mixed_z * std(log_p)    # restore log-prob scale
+
+        The std-rescale step is load-bearing: without it, downstream
+        softmax(mixed) over unit-variance scores produces a near-uniform
+        distribution regardless of alpha, silently erasing the dense signal.
+        """
+        norm_log_p = self._z_score(log_p, dim=-1)
+        norm_s = self._z_score(s_dense, dim=-1)
+        mixed_z = (1.0 - a) * norm_log_p + a * norm_s
+        log_p_std = log_p.std(dim=-1, keepdim=True)
+        return mixed_z * log_p_std
 
 
 class AlphaParams(nn.Module):

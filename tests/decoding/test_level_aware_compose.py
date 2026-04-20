@@ -191,8 +191,9 @@ def test_alpha_one_uses_dense():
     # Verify output shape
     assert beams.shape == (B, k, 1), f"Expected ({B}, {k}, 1), got {beams.shape}"
 
-    # When alpha=1, mixed probas = softmax(z_score(dense_scores))
-    # The top beam's token should have the highest dense score
+    # When alpha=1, mixed logits = z_score(s_dense) * std(log_p), which is a
+    # positive scalar rescale of z_score(s_dense). argmax of softmax(logits)
+    # is therefore preserved at argmax(s_dense).
     with torch.no_grad():
         q = aux_head(decoder_hidden_h0)  # [1, d_item]
     r = codebook_embs[0]  # [vocab, d_item]
@@ -204,6 +205,61 @@ def test_alpha_one_uses_dense():
     assert top_beam_token == top_token_by_dense, (
         f"alpha=1: expected top token {top_token_by_dense}, got {top_beam_token}. "
         f"Dense scores: {s_dense}"
+    )
+
+
+def test_mixing_preserves_log_p_sharpness():
+    """Regression test for audit bug B2: softmax-over-unit-variance collapse.
+
+    Before the fix, mixing z-scored log_p and dense into softmax produced a
+    near-uniform distribution regardless of the original log_p sharpness,
+    silently erasing the autoregressive prior even at small alpha. After
+    the fix, mixing restores log_p's std before the softmax, so at low
+    alpha the dominant token of log_p remains dominant in mixed_probas.
+    """
+    vocab, d_model, d_item, B, k, L, codebook_embs, aux_head = make_setup(
+        vocab=16, d_model=8, d_item=8, B=1, k=1, L=1
+    )
+
+    # A sharply peaked log_p: one token dominates.
+    logits = torch.full((B, vocab), -20.0)
+    dominant_token = 3
+    logits[0, dominant_token] = 5.0
+    probas = torch.softmax(logits, dim=-1)
+
+    # Dense scores favor a different token to make the test non-trivial.
+    decoder_hidden = torch.randn(B, d_model)
+
+    strategy = LevelAwareHybridDecoding(
+        base_strategy=VanillaBeamSearch(),
+        alpha=[0.1],  # mostly log_p
+        aux_head=aux_head,
+    )
+
+    # Directly exercise _mix_logspace to assert sharpness, bypassing the
+    # stochastic multinomial in the base strategy.
+    log_p = torch.log(probas.clamp(min=1e-10))
+    r = strategy._compute_partial_reconstruction(
+        beams=None, cand_ids=torch.arange(vocab), codebook_embs=codebook_embs, h=0
+    )
+    with torch.no_grad():
+        q = aux_head(decoder_hidden)
+    s_dense = (q.unsqueeze(1) * r).sum(-1)
+
+    mixed = strategy._mix_logspace(log_p, s_dense, a=0.1)
+    mixed_probas = torch.softmax(mixed, dim=-1)
+
+    # The dominant log_p token must remain the argmax under mostly-log_p mixing.
+    assert mixed_probas.argmax(dim=-1).item() == dominant_token, (
+        f"B2 regression: mixing at alpha=0.1 should preserve log_p's argmax "
+        f"(token {dominant_token}), got {mixed_probas.argmax(dim=-1).item()}. "
+        f"Probas: {mixed_probas}"
+    )
+    # And the probability mass on the dominant token must be well above
+    # uniform (1/vocab = 0.0625). Pre-fix value was ~uniform.
+    assert mixed_probas[0, dominant_token].item() > 0.5, (
+        f"B2 regression: expected dominant probability > 0.5, got "
+        f"{mixed_probas[0, dominant_token].item():.4f}."
     )
 
 
