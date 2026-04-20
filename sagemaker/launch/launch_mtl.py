@@ -1,9 +1,15 @@
-"""Launch MTL decoder training for all four datasets on SageMaker.
+"""Launch MTL decoder training for the CIKM 2026 datasets on SageMaker.
+
+Default scope is ``beauty`` + ``sports`` only — the remaining datasets
+(toys, steam, ml32m) were dropped from the paper due to codebook-collapse
+or data-pipeline incompatibilities (see AGENTS.md "Checkpoint status").
+They remain available via ``--datasets`` for ad-hoc experiments but will
+fail at checkpoint load unless the corresponding RQ-VAE ckpt exists.
 
 Usage::
 
     python sagemaker/launch/launch_mtl.py
-    python sagemaker/launch/launch_mtl.py --datasets beauty sports
+    python sagemaker/launch/launch_mtl.py --datasets beauty
     python sagemaker/launch/launch_mtl.py --instance-type ml.g5.4xlarge
 """
 import argparse
@@ -15,6 +21,7 @@ from sagemaker.pytorch import PyTorch
 
 
 DATASETS = ["beauty", "sports", "toys", "steam", "ml32m"]
+DEFAULT_DATASETS = ["beauty", "sports"]
 S3_BASE = "s3://REDACTED-BUCKET/rqvae-level-aware"
 
 
@@ -56,14 +63,14 @@ def get_estimator(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Launch MTL decoder training for all datasets."
+        description="Launch MTL decoder training for CIKM 2026 datasets."
     )
     parser.add_argument(
         "--datasets",
         nargs="+",
         choices=DATASETS,
-        default=DATASETS,
-        help="Datasets to launch (default: all four).",
+        default=DEFAULT_DATASETS,
+        help="Datasets to launch (default: beauty + sports).",
     )
     parser.add_argument(
         "--instance-type",
