@@ -3,13 +3,20 @@
 Key differences from train_decoder.py:
 1. Builds a SASRecAuxHead at init, initialized from RQ-VAE encoder outputs.
 2. Aux head parameters are added to the AdamW optimizer.
-3. Forward pass extracts decoder_hidden = decoder_output[:, -1, :] (shape [B, 384])
-   after teacher-forcing through all L SID tokens. The model.forward() slices
-   decoder_output as [:, :-1], so shape is [B, L, 384]; index -1 gives [B, 384].
-4. Aux loss: sampled-softmax InfoNCE against the SASRec item embedding table.
+3. Forward pass extracts decoder_output_full [B, L, d_model] after teacher
+   forcing. The aux head is applied at EVERY decoder position h in [0, L),
+   not only the final one, so that during level-aware beam search the head
+   sees in-distribution partial-sequence hidden states. Without this, the
+   aux head is trained only on the full-sequence representation but queried
+   on partial ones, producing near-random dense scores at intermediate
+   levels (train/infer skew; see audit bug B1).
+4. Aux loss: sampled-softmax InfoNCE against the SASRec item embedding
+   table, averaged over the L decoder positions. Target is the same next
+   item at every position (the head learns to project partial states
+   toward the final target).
 5. Total loss: L_sid + lambda_warmup(step) * L_sasrec.
-6. Gradient clipping is ALWAYS applied (clip_grad_norm_); vanilla train() only clips
-   when max_grad_norm is not None.
+6. Gradient clipping is ALWAYS applied (clip_grad_norm_); vanilla train()
+   only clips when max_grad_norm is not None.
 7. Checkpoints save aux_head state dict alongside the main model.
 """
 
@@ -257,21 +264,26 @@ def train_mtl(
                         sid_loss = sid_loss + F.cross_entropy(logits, fut_ids[:, h].long())
 
                     # ---- SASRec InfoNCE aux loss ---- #
-                    # Final decoder hidden state: [B, t5_d_model]
-                    decoder_hidden = decoder_output_full[:, -1, :]
-                    query = aux_head(decoder_hidden)  # [B, vae_embed_dim]
-
-                    # next_item_ids: item indices for the target items
-                    # tokenized_data.next_item_ids should contain corpus item indices
+                    # Supervise the aux head at EVERY decoder position h, not
+                    # just the final one. At inference, level-aware beam
+                    # search queries the head on the partial-sequence hidden
+                    # state dec_out[:, -1, :] at each level h; training only
+                    # on h=L-1 leaves the head undefined on those partial
+                    # states (train/infer skew — audit bug B1).
                     next_item_ids = tokenized_data.next_item_ids
+                    item_embeddings = accelerator.unwrap_model(aux_head).item_embeddings
 
-                    aux_loss = sasrec_infonce_loss(
-                        query=query,
-                        positive_item_ids=next_item_ids,
-                        item_embeddings=accelerator.unwrap_model(aux_head).item_embeddings,
-                        n_negatives=sasrec_n_negatives,
-                        temperature=sasrec_temperature,
-                    )
+                    aux_loss = torch.tensor(0.0, device=device)
+                    for h in range(vae_n_layers):
+                        query_h = aux_head(decoder_output_full[:, h, :])  # [B, d_item]
+                        aux_loss = aux_loss + sasrec_infonce_loss(
+                            query=query_h,
+                            positive_item_ids=next_item_ids,
+                            item_embeddings=item_embeddings,
+                            n_negatives=sasrec_n_negatives,
+                            temperature=sasrec_temperature,
+                        )
+                    aux_loss = aux_loss / vae_n_layers
 
                     loss = (sid_loss + current_lambda * aux_loss) / gradient_accumulate_every
 
