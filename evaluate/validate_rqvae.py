@@ -16,7 +16,7 @@ from pathlib import Path
 import gin
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import BatchSampler, DataLoader, SequentialSampler
 
 from data.processed import ItemData
 from modules.rqvae import RqVae
@@ -125,7 +125,12 @@ def main() -> None:
     # Encode all items → collect SIDs + residual norms per level
     all_sids = [[] for _ in range(n_layers)]
     all_res_norms = [[] for _ in range(n_layers)]
-    loader = DataLoader(items, batch_size=args.batch_size, collate_fn=lambda b: b)
+    loader = DataLoader(
+        items,
+        sampler=BatchSampler(SequentialSampler(items), args.batch_size, False),
+        batch_size=None,
+        collate_fn=lambda b: b,
+    )
     with torch.no_grad():
         for batch in loader:
             x = batch.x.to(device)
