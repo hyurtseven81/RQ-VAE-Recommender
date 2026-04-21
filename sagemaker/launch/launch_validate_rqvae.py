@@ -27,6 +27,11 @@ TARGETS = {
         "configs/rqvae_amazon_sports_v6.gin",
         f"{S3_BASE}/rqvae/sports-v6/rqvae-sports-v6-20260420-1856/output/model.tar.gz",
     ),
+    "sports_v7": (
+        "validate-rqvae-sports-v7",
+        "configs/rqvae_amazon_sports_v7.gin",
+        f"{S3_BASE}/rqvae/sports-v7/rqvae-sports-v7-20260421-101131/output/model.tar.gz",
+    ),
 }
 
 

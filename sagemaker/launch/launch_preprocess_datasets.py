@@ -27,7 +27,7 @@ from sagemaker.pytorch import PyTorch
 
 S3_BASE = "s3://REDACTED-BUCKET/rqvae-level-aware"
 BUCKET = "REDACTED-BUCKET"
-S3_DATASETS_PREFIX = "rqvae-level-aware/datasets/amazon"
+S3_DATASETS_PREFIX_ROOT = "rqvae-level-aware/datasets"
 
 
 def launch(splits: str, instance_type: str) -> str:

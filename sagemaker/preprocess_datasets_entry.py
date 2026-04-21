@@ -1,44 +1,67 @@
-"""SageMaker entry point: preprocess Amazon datasets and copy output to SM_MODEL_DIR.
+"""SageMaker entry point: preprocess Amazon/Steam datasets and copy output to SM_MODEL_DIR.
 
-Runs AmazonReviews for the given splits, which triggers:
-  1. Google Drive download of raw data (~1.2GB) into dataset/amazon/raw/<split>/
-  2. Sentence-T5 embedding of item text (~40 min on ml.g5.4xlarge)
-  3. Write of data_<split>.pt to dataset/amazon/processed/
-
-Mirrors the result into SM_MODEL_DIR so SageMaker packs it to model.tar.gz,
-which we then extract into s3://.../datasets/amazon/{processed,raw}/.
+For --splits: amazon splits (beauty, sports, toys) and/or 'steam'.
+Writes processed .pt files + raw data into SM_MODEL_DIR so SageMaker packs them
+into model.tar.gz for extraction to s3://.../datasets/<dataset>/.
 """
 import argparse
 import os
 import shutil
 from pathlib import Path
 
-from data.amazon import AmazonReviews
+
+def _preprocess_amazon(local_root: Path, split: str) -> None:
+    from data.amazon import AmazonReviews
+    print(f"\n=== Preprocessing amazon split='{split}' ===", flush=True)
+    AmazonReviews(root=str(local_root), split=split)
+    print(f"Done: {split}", flush=True)
+
+
+def _preprocess_steam(local_root: Path) -> None:
+    from data.steam import RawSteam
+    print("\n=== Preprocessing steam ===", flush=True)
+    RawSteam(root=str(local_root))
+    print("Done: steam", flush=True)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--splits", default="beauty,sports")
+    ap.add_argument("--splits", default="beauty,sports",
+                    help="Comma-separated: amazon splits (beauty,sports,toys) and/or 'steam'.")
     args = ap.parse_args()
 
     sm_model_dir = Path(os.environ.get("SM_MODEL_DIR", "/opt/ml/model"))
-    local_root = Path("dataset/amazon")
-    local_root.mkdir(parents=True, exist_ok=True)
 
-    for split in [s.strip() for s in args.splits.split(",") if s.strip()]:
-        print(f"\n=== Preprocessing split='{split}' ===", flush=True)
-        AmazonReviews(root=str(local_root), split=split)
-        print(f"Done: {split}", flush=True)
+    amazon_splits = [s.strip() for s in args.splits.split(",")
+                     if s.strip() in ("beauty", "sports", "toys")]
+    want_steam = "steam" in args.splits.split(",")
 
-    # Mirror processed + raw into SM_MODEL_DIR so SageMaker uploads as model.tar.gz
-    for sub in ("processed", "raw"):
-        src = local_root / sub
-        dest = sm_model_dir / "amazon" / sub
-        if dest.exists():
-            shutil.rmtree(dest)
-        if src.exists():
-            shutil.copytree(src, dest)
-            print(f"Copied {src} -> {dest}")
+    if amazon_splits:
+        amazon_root = Path("dataset/amazon")
+        amazon_root.mkdir(parents=True, exist_ok=True)
+        for split in amazon_splits:
+            _preprocess_amazon(amazon_root, split)
+        for sub in ("processed", "raw"):
+            src = amazon_root / sub
+            dest = sm_model_dir / "amazon" / sub
+            if dest.exists():
+                shutil.rmtree(dest)
+            if src.exists():
+                shutil.copytree(src, dest)
+                print(f"Copied {src} -> {dest}")
+
+    if want_steam:
+        steam_root = Path("dataset/steam")
+        steam_root.mkdir(parents=True, exist_ok=True)
+        _preprocess_steam(steam_root)
+        for sub in ("processed", "raw"):
+            src = steam_root / sub
+            dest = sm_model_dir / "steam" / sub
+            if dest.exists():
+                shutil.rmtree(dest)
+            if src.exists():
+                shutil.copytree(src, dest)
+                print(f"Copied {src} -> {dest}")
 
 
 if __name__ == "__main__":

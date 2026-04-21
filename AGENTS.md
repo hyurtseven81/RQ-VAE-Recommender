@@ -44,26 +44,30 @@ paper/                 — LaTeX source (CIKM 2026 submission)
 - **Instance quotas**: g5.xlarge on-demand=1 (shared), g5.4xlarge on-demand=30 (use this), g5.xlarge spot=5
 - **Midway auth**: credentials expire every ~10h; run `mwinit` to refresh before launching jobs
 
-## Checkpoint status (as of 2026-04-16)
+## Checkpoint status (as of 2026-04-21)
 
-| Dataset | RQ-VAE ckpt | Decoder MTL ckpt |
-|---------|------------|------------------|
-| Beauty  | `trained_models/rqvae_amazon_beauty/checkpoint_399999.pt` | ✅ `s3://REDACTED-BUCKET/rqvae-level-aware/decoder-mtl/beauty/decoder-mtl-beauty-od-20260412-2036/output/model.tar.gz` |
-| Sports  | `trained_models/rqvae_amazon_sports/checkpoint_high_entropy.pt` | ✅ `s3://REDACTED-BUCKET/rqvae-level-aware/decoder-mtl/sports/decoder-mtl-sports-od4-20260415-1851/output/model.tar.gz` |
-| Steam   | ⚠️ Likely RQ-VAE SID degeneracy (level-0 codebook min_dist=0.002, decoder SID loss→0 in 5 steps, eval metrics=1.0) — **dropped** | ❌ Decoder exhibits 100% recall which is a symptom of SID collapse — **dropped** |
-| Toys    | ⚠️ Codebook collapse (SID=0, all metrics=1.0) — **dropped** | — |
-| ML1M    | `trained_models/rqvae_ml1m/checkpoint_399999.pt` | ❌ Incompatible data pipeline (different feature dims, split structure, max_seq_len) — **dropped** |
+| Dataset | RQ-VAE ckpt | Validation verdict | Decoder MTL ckpt |
+|---------|------------|--------|------------------|
+| Beauty  | `s3://REDACTED-BUCKET/rqvae-level-aware/checkpoints/rqvae_amazon_beauty/checkpoint_399999.pt` | ✅ HEALTHY: 248–256/256 unique SIDs per level, entropy 7.66–7.73 bits. Architecture per saved `model_config`: `ROTATION_TRICK + decoder.normalize=True + n_cat_feats=0`. | ✅ `s3://REDACTED-BUCKET/rqvae-level-aware/decoder-mtl/beauty/decoder-mtl-beauty-od-20260412-2036/output/model.tar.gz` |
+| Sports (pre-fork) | `trained_models/rqvae_amazon_sports/checkpoint_high_entropy.pt` | ❌ Collapsed under prior fork code | ⚠️ `decoder-mtl-sports-od4-20260415-1851` — retrain once Sports RQ-VAE is proven healthy |
+| Sports v6 / v7 | — | ❌ COLLAPSED under the (now reverted) L2-fix commit `57808c5`, which caused double normalization when combined with `decoder.normalize=True`. | — |
+| Steam   | TBD — sanity check pending (5k-step) | — | — |
+| Toys    | TBD — sanity check pending (5k-step) | — | — |
+| ML1M    | `trained_models/rqvae_ml1m/checkpoint_399999.pt` | — | ❌ Incompatible data pipeline (different feature dims, split structure, max_seq_len) — **dropped** |
 
-## Datasets (final set for paper)
+## Datasets (candidates for paper)
 
-- **Amazon Beauty**: ~22K users, ~12K items, auto-download
-- **Amazon Sports**: ~35K users, ~18K items, auto-download
+- **Amazon Beauty**: ~22K users, ~12K items, auto-download. Known-healthy RQ-VAE.
+- **Amazon Sports**: ~35K users, ~18K items, auto-download. RQ-VAE retrain pending after revert.
+- **Amazon Toys**: ~19K users, ~12K items, auto-download. Sanity check pending.
+- **Steam**: ~334K users, ~13K items, HuggingFace download. Sanity check pending.
 
 ## Data prep
 
-- Amazon (Beauty, Sports): auto-download via existing loaders
-- Steam: downloads from HuggingFace (UCSD mirror is 404); first run `python -c "from data.steam import RawSteam; RawSteam().download()"` to cache raw data
-- All datasets use leave-one-out split; 5-core filtering for Steam
+- Amazon (Beauty, Sports, Toys): auto-download via `AmazonReviews.download()` (one Google Drive zip covers all three splits). Preprocessed features cached at `s3://REDACTED-BUCKET/rqvae-level-aware/datasets/amazon/` for Beauty + Sports (Toys cache pending, see `sagemaker/launch/launch_preprocess_datasets.py`).
+- Steam: downloads from HuggingFace (UCSD mirror is 404). Preprocess + cache with `launch_preprocess_datasets.py --splits steam`.
+- All datasets use leave-one-out split; 5-core filtering for Steam.
+- Sentence-T5 features are already L2-normalized (verified Beauty + Sports: norm 0.9995–1.0005).
 
 ## Known issues and workarounds
 

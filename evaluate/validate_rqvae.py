@@ -83,18 +83,15 @@ def _config_shim(
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config_path", required=True)
-    parser.add_argument("--rqvae_checkpoint", required=True)
-    parser.add_argument(
-        "--output_dir",
-        default=os.environ.get("SM_OUTPUT_DATA_DIR", "/opt/ml/output/data"),
-    )
-    parser.add_argument("--batch_size", type=int, default=512)
-    args = parser.parse_args()
+def validate(config_path: str, rqvae_checkpoint: str, output_dir: str,
+             batch_size: int = 512, parse_gin: bool = True) -> dict:
+    """Run validation and return the verdict dict. Also writes verdict.json to output_dir.
 
-    gin.parse_config_file(args.config_path)
+    If parse_gin is False, caller is expected to have already parsed the gin config
+    (e.g. from a sanity-check entry that already called gin.parse_config_file()).
+    """
+    if parse_gin:
+        gin.parse_config_file(config_path)
     cfg = _config_shim()
     dataset_folder = cfg.pop("_dataset_folder")
     dataset = cfg.pop("_dataset")
@@ -119,7 +116,7 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    ckpt_path = _find_checkpoint(args.rqvae_checkpoint)
+    ckpt_path = _find_checkpoint(rqvae_checkpoint)
     print(f"Loading checkpoint: {ckpt_path}")
     state = torch.load(ckpt_path, map_location=device, weights_only=False)
     model_cfg = state.get("model_config", {})
@@ -152,7 +149,7 @@ def main() -> None:
     all_res_norms = [[] for _ in range(n_layers)]
     loader = DataLoader(
         items,
-        sampler=BatchSampler(SequentialSampler(items), args.batch_size, False),
+        sampler=BatchSampler(SequentialSampler(items), batch_size, False),
         batch_size=None,
         collate_fn=lambda b: b,
     )
@@ -207,8 +204,6 @@ def main() -> None:
             f"min_dist={min_dist:.4f}, E|r|={norms.mean():.4f}"
         )
 
-    # Health verdict: every level needs > 10 unique SIDs and > 0.01 min_dist
-    # Additionally level 0 entropy should be non-trivial (> 2 bits = more than 4 effective codes)
     collapsed_levels = [
         pl["level"]
         for pl in per_level
@@ -219,18 +214,36 @@ def main() -> None:
     verdict = dict(
         healthy=healthy,
         checkpoint=str(ckpt_path),
-        config=args.config_path,
+        config=config_path,
         num_items=len(items),
         collapsed_levels=collapsed_levels,
         per_level=per_level,
     )
-
-    os.makedirs(args.output_dir, exist_ok=True)
-    out_file = Path(args.output_dir) / "verdict.json"
+    os.makedirs(output_dir, exist_ok=True)
+    out_file = Path(output_dir) / "verdict.json"
     with open(out_file, "w") as f:
         json.dump(verdict, f, indent=2)
     print(f"\n=== VERDICT: {'HEALTHY' if healthy else 'COLLAPSED'} ===")
     print(f"Wrote {out_file}")
+    return verdict
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config_path", required=True)
+    parser.add_argument("--rqvae_checkpoint", required=True)
+    parser.add_argument(
+        "--output_dir",
+        default=os.environ.get("SM_OUTPUT_DATA_DIR", "/opt/ml/output/data"),
+    )
+    parser.add_argument("--batch_size", type=int, default=512)
+    args = parser.parse_args()
+    validate(
+        config_path=args.config_path,
+        rqvae_checkpoint=args.rqvae_checkpoint,
+        output_dir=args.output_dir,
+        batch_size=args.batch_size,
+    )
 
 
 if __name__ == "__main__":
