@@ -78,6 +78,8 @@ def main() -> None:
         estimator = get_estimator(job_stub, gin_config, sess, args.instance_type)
         # SageMaker auto-extracts .tar.gz; a bare .pt is copied as-is.
         inputs = {"model": TrainingInput(ckpt_s3)}
+        if args.dataset_s3:
+            inputs["dataset"] = TrainingInput(args.dataset_s3)
         from datetime import datetime
         job_name = f"{job_stub}-{datetime.utcnow():%Y%m%d-%H%M%S}"
         estimator.fit(inputs=inputs, job_name=job_name, wait=False, logs=False)
