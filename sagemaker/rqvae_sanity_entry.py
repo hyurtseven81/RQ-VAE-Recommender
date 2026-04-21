@@ -22,6 +22,9 @@ def main() -> None:
     ap.add_argument("--iterations", type=int, default=5000)
     args, _ = ap.parse_known_args()
 
+    # Import first so @gin.configurable on train() registers before parse_config_file
+    from train_rqvae import train
+
     gin.parse_config_file(args.config_path)
     override_save_dir_for_sagemaker()
     # Shrink the training run — keep a single end-of-run checkpoint
@@ -31,7 +34,6 @@ def main() -> None:
     gin.bind_parameter("train.wandb_logging", False)
 
     print(f"=== Training for {args.iterations} iters with {args.config_path} ===", flush=True)
-    from train_rqvae import train
     train()
     print("=== Training done, running validator ===", flush=True)
 
