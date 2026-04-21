@@ -47,39 +47,34 @@ def _find_checkpoint(path: str) -> Path:
     raise FileNotFoundError(path)
 
 
-@gin.configurable("train", denylist=[])
-def _config_shim(
-    vae_input_dim=768,
-    vae_embed_dim=32,
-    vae_hidden_dims=(512, 256, 128),
-    vae_codebook_size=256,
-    vae_n_layers=3,
-    vae_n_cat_feats=0,
-    vae_codebook_normalize=False,
-    vae_sim_vq=False,
-    vae_codebook_mode=None,
-    commitment_weight=0.25,
-    use_kmeans_init=True,
-    dataset_folder="dataset/amazon",
-    dataset=None,
-    dataset_split="beauty",
-    **_kwargs,
-):
+def _read_train_params() -> dict:
+    """Read gin-bound ``train_rqvae.train.*`` params needed to reconstruct RqVae
+    and locate ItemData. Uses fully qualified selectors so this coexists with
+    any other module that defines a configurable named ``train``.
+    """
+    import train_rqvae  # noqa: F401 — ensure @gin.configurable decorator registers
+
+    def _q(name, default):
+        try:
+            return gin.query_parameter(f"train_rqvae.train.{name}")
+        except ValueError:
+            return default
+
     return dict(
-        input_dim=vae_input_dim,
-        embed_dim=vae_embed_dim,
-        hidden_dims=list(vae_hidden_dims),
-        codebook_size=vae_codebook_size,
-        n_layers=vae_n_layers,
-        n_cat_features=vae_n_cat_feats,
-        codebook_normalize=vae_codebook_normalize,
-        codebook_sim_vq=vae_sim_vq,
-        codebook_mode=vae_codebook_mode,
-        codebook_kmeans_init=use_kmeans_init,
-        commitment_weight=commitment_weight,
-        _dataset_folder=dataset_folder,
-        _dataset=dataset,
-        _dataset_split=dataset_split,
+        input_dim=_q("vae_input_dim", 768),
+        embed_dim=_q("vae_embed_dim", 32),
+        hidden_dims=list(_q("vae_hidden_dims", (512, 256, 128))),
+        codebook_size=_q("vae_codebook_size", 256),
+        n_layers=_q("vae_n_layers", 3),
+        n_cat_features=_q("vae_n_cat_feats", 0),
+        codebook_normalize=_q("vae_codebook_normalize", False),
+        codebook_sim_vq=_q("vae_sim_vq", False),
+        codebook_mode=_q("vae_codebook_mode", None),
+        codebook_kmeans_init=_q("use_kmeans_init", True),
+        commitment_weight=_q("commitment_weight", 0.25),
+        _dataset_folder=_q("dataset_folder", "dataset/amazon"),
+        _dataset=_q("dataset", None),
+        _dataset_split=_q("dataset_split", "beauty"),
     )
 
 
@@ -90,9 +85,12 @@ def validate(config_path: str, rqvae_checkpoint: str, output_dir: str,
     If parse_gin is False, caller is expected to have already parsed the gin config
     (e.g. from a sanity-check entry that already called gin.parse_config_file()).
     """
+    # Ensure train_rqvae's @gin.configurable registers before gin.parse_config_file
+    # so the config's 'train.*' bindings resolve to train_rqvae.train.*.
+    import train_rqvae  # noqa: F401
     if parse_gin:
         gin.parse_config_file(config_path)
-    cfg = _config_shim()
+    cfg = _read_train_params()
     dataset_folder = cfg.pop("_dataset_folder")
     dataset = cfg.pop("_dataset")
     dataset_split = cfg.pop("_dataset_split")

@@ -27,11 +27,13 @@ def main() -> None:
 
     gin.parse_config_file(args.config_path)
     override_save_dir_for_sagemaker()
-    # Shrink the training run — keep a single end-of-run checkpoint
-    gin.bind_parameter("train.iterations", args.iterations)
-    gin.bind_parameter("train.save_model_every", args.iterations)
-    gin.bind_parameter("train.eval_every", args.iterations)
-    gin.bind_parameter("train.wandb_logging", False)
+    # Shrink the training run — keep a single end-of-run checkpoint. Use fully
+    # qualified train_rqvae.train.* selectors to coexist with validate_rqvae's
+    # own configurable named 'train'.
+    gin.bind_parameter("train_rqvae.train.iterations", args.iterations)
+    gin.bind_parameter("train_rqvae.train.save_model_every", args.iterations)
+    gin.bind_parameter("train_rqvae.train.eval_every", args.iterations)
+    gin.bind_parameter("train_rqvae.train.wandb_logging", False)
 
     print(f"=== Training for {args.iterations} iters with {args.config_path} ===", flush=True)
     train()
