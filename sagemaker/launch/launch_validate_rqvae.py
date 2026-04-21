@@ -43,7 +43,7 @@ def get_estimator(job_stub: str, gin_config: str, sess: sagemaker.Session,
         sagemaker_session=sess,
         output_path=f"{S3_BASE}/validate-rqvae/{job_stub}/",
         use_spot_instances=False,  # short job; on-demand avoids spot wait
-        max_run=3600,
+        max_run=7200,  # 2h; data preprocessing runs fresh on each container
         hyperparameters={
             "config_path": gin_config,
             "rqvae_checkpoint": "/opt/ml/input/data/model",
@@ -62,6 +62,12 @@ def main() -> None:
         "--targets", nargs="+", choices=list(TARGETS), default=list(TARGETS)
     )
     parser.add_argument("--instance-type", default="ml.g5.4xlarge")
+    parser.add_argument(
+        "--dataset-s3",
+        default=f"{S3_BASE}/datasets/amazon/",
+        help="S3 URI with preprocessed dataset cache (passed as 'dataset' channel). "
+             "Pass empty string to force fresh preprocessing inside the container.",
+    )
     args = parser.parse_args()
 
     boto_sess = boto3.Session(profile_name="REDACTED-PROFILE", region_name="us-east-1")

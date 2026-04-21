@@ -27,9 +27,18 @@ def _find_checkpoint(path: str) -> Path:
     if p.is_file():
         return p
     if p.is_dir():
+        # Auto-extract any model.tar.gz (SageMaker doesn't unpack training-channel tarballs)
+        tarballs = list(p.rglob("*.tar.gz"))
+        if tarballs and not list(p.rglob("*.pt")):
+            import tarfile
+            extract_dir = Path("/tmp/ckpt_extracted")
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(tarballs[0]) as tf:
+                tf.extractall(extract_dir)
+            p = extract_dir
         pts = sorted(p.rglob("*.pt"))
         if not pts:
-            raise FileNotFoundError(f"No .pt file under {p}")
+            raise FileNotFoundError(f"No .pt file under {path}")
         # Prefer checkpoint_399999.pt, else latest
         for cand in pts:
             if cand.name == "checkpoint_399999.pt":
@@ -90,6 +99,22 @@ def main() -> None:
     dataset_folder = cfg.pop("_dataset_folder")
     dataset = cfg.pop("_dataset")
     dataset_split = cfg.pop("_dataset_split")
+
+    # If SageMaker mounted a preprocessed dataset channel, link it into the
+    # gin-configured dataset_folder so ItemData reads the cache instead of
+    # re-downloading + re-embedding.
+    sm_dataset_channel = os.environ.get("SM_CHANNEL_DATASET")
+    if sm_dataset_channel:
+        import shutil as _shutil
+        target = Path(dataset_folder)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() or target.is_symlink():
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            else:
+                _shutil.rmtree(target)
+        target.symlink_to(sm_dataset_channel)
+        print(f"Linked preprocessed dataset: {sm_dataset_channel} -> {target}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
