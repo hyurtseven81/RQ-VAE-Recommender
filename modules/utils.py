@@ -30,7 +30,12 @@ def parse_config():
 
 
 def override_save_dir_for_sagemaker():
-    """If running on SageMaker, override save_dir_root to write to /opt/ml/model/."""
+    """If running on SageMaker, override save_dir_root to write to /opt/ml/model/.
+
+    Also mounts SM_CHANNEL_DATASET as the configured dataset_folder via
+    symlink, so training jobs consume the preprocessed dataset cache from S3
+    instead of re-running Sentence-T5 embedding every container start.
+    """
     import os
     sm_model_dir = os.environ.get("SM_MODEL_DIR")
     if sm_model_dir is None:
@@ -44,6 +49,28 @@ def override_save_dir_for_sagemaker():
     # Disable wandb if no API key is configured
     if not os.environ.get("WANDB_API_KEY"):
         os.environ["WANDB_MODE"] = "disabled"
+    # Mount the preprocessed-dataset channel into the gin dataset_folder.
+    # The channel is expected to contain processed/data_<split>.pt + raw/<split>/
+    # from sagemaker/preprocess_datasets_entry.py.
+    sm_dataset = os.environ.get("SM_CHANNEL_DATASET")
+    if sm_dataset:
+        import pathlib
+        import shutil
+        for fn_name in ("train.dataset_folder", "train_mtl.dataset_folder"):
+            try:
+                folder = gin.query_parameter(fn_name)
+            except ValueError:
+                continue
+            target = pathlib.Path(folder)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() or target.is_symlink():
+                if target.is_symlink() or target.is_file():
+                    target.unlink()
+                else:
+                    shutil.rmtree(target)
+            target.symlink_to(sm_dataset)
+            print(f"Linked dataset cache: {sm_dataset} -> {target}")
+            break
 
 
 @torch.no_grad

@@ -67,6 +67,31 @@ paper/                 — LaTeX source (CIKM 2026 submission)
 
 ## Known issues and workarounds
 
+### RQ-VAE codebook collapse — two root causes identified (2026-04-21)
+
+1. **L2-norm bug for `n_cat_feats=0`** (fixed in commit `57808c5`). Previously
+   `modules/rqvae.py` did `torch.cat([l2norm(x_hat[..., :-0]), x_hat[..., -0:]])`
+   which returns un-normalized `x_hat` because Python slicing `[:-0]` is empty.
+   Reconstruction loss collapsed trivially (`rl → 0`, `vl → 0`) and the codebook
+   went unused. Affected Sports, Steam, Toys configs where `n_cat_feats=0`. Fix
+   special-cases `n_cat_feats == 0` to apply `l2norm` to the full reconstruction.
+
+2. **`ROTATION_TRICK` mode destabilises Sports** even with the L2-norm fix
+   applied. Sports v6 (`rotation_trick + kmeans + cw=0.25 + L2-fix`) produced
+   completely collapsed codebooks (1 unique SID per level). Beauty, trained
+   with `STE` and the same `n_cat_feats=0`, is healthy. Recommendation: use
+   `STE` for Amazon splits.
+
+3. **`kmeans_initted` was not persisted** (fixed in commit `0449747`).
+   `Quantize.kmeans_initted` used to be a plain Python bool, so loading a
+   trained RQ-VAE reset it to False and the first forward() re-ran KMeans
+   over whatever batch arrived first, silently overwriting the trained
+   codebook. This invalidates any reported metric that came from a reloaded
+   RQ-VAE (decoder baseline, decoder MTL, alpha search, eval sweep,
+   residual-entropy analysis). Fixed by registering it as a buffer and
+   adding a `load_state_dict` pre-hook that injects `True` for legacy
+   state dicts.
+
 ### SageMaker dependency pins (requirements.txt)
 These are critical — relaxing them breaks SageMaker containers:
 - `polars==1.9.0` — newer versions change `.list.to_array()` return type from List to Array, breaking `_df_to_tensor_dict`
