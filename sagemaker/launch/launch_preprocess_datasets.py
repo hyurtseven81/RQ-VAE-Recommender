@@ -87,9 +87,17 @@ def sync(job_name: str) -> None:
         for member in tf:
             if not member.isfile():
                 continue
-            # Strip leading "amazon/" from the tarball path, re-add under dataset prefix
-            rel = member.name.removeprefix("./").removeprefix("amazon/")
-            s3_key = f"{S3_DATASETS_PREFIX}/{rel}"
+            # Tarball entries look like "amazon/processed/data_beauty.pt" or
+            # "steam/processed/data_steam.pt". Route each to the corresponding
+            # datasets/<dataset>/ prefix.
+            rel = member.name.removeprefix("./")
+            parts = rel.split("/", 1)
+            if len(parts) < 2:
+                continue
+            ds, sub = parts
+            if ds not in ("amazon", "steam"):
+                continue
+            s3_key = f"{S3_DATASETS_PREFIX_ROOT}/{ds}/{sub}"
             data = tf.extractfile(member)
             if data is None:
                 continue
@@ -97,7 +105,7 @@ def sync(job_name: str) -> None:
             uploaded += 1
             if uploaded % 10 == 0:
                 print(f"  uploaded {uploaded} files...")
-    print(f"Done. Uploaded {uploaded} files to s3://{BUCKET}/{S3_DATASETS_PREFIX}/")
+    print(f"Done. Uploaded {uploaded} files to s3://{BUCKET}/{S3_DATASETS_PREFIX_ROOT}/")
 
 
 def main() -> None:
