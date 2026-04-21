@@ -38,7 +38,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install scipy pyarrow pandas pytest pytest-cov gin-config transformers
+          pip install scipy pyarrow pandas pytest pytest-cov gin-config transformers einops
           pip install -e ".[dev,experiments]" || pip install pytest pytest-cov scipy pyarrow pandas
       - name: Run tests with coverage
         run: |
