@@ -140,13 +140,10 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
         quantized = self.get_semantic_ids(x, gumbel_t)
         embs, residuals = quantized.embeddings, quantized.residuals
         x_hat = self.decode(embs.sum(axis=-1))
-        if self.n_cat_feats > 0:
-            x_hat = torch.cat(
-                [l2norm(x_hat[..., : -self.n_cat_feats]), x_hat[..., -self.n_cat_feats :]],
-                axis=-1,
-            )
-        else:
-            x_hat = l2norm(x_hat)
+        x_hat = torch.cat(
+            [l2norm(x_hat[..., : -self.n_cat_feats]), x_hat[..., -self.n_cat_feats :]],
+            axis=-1,
+        )
 
         reconstuction_loss = self.reconstruction_loss(x_hat, x)
         rqvae_loss = quantized.quantize_loss
