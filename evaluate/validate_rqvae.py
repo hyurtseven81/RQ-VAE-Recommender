@@ -51,14 +51,21 @@ def _read_train_params() -> dict:
     """Read gin-bound ``train_rqvae.train.*`` params needed to reconstruct RqVae
     and locate ItemData. Uses fully qualified selectors so this coexists with
     any other module that defines a configurable named ``train``.
+
+    gin.query_parameter returns a ConfigurableReference for '%Enum.FOO' style
+    values; we resolve those by calling .scoped_configurable_fn().
     """
+    import gin.config
     import train_rqvae  # noqa: F401 — ensure @gin.configurable decorator registers
 
     def _q(name, default):
         try:
-            return gin.query_parameter(f"train_rqvae.train.{name}")
+            v = gin.query_parameter(f"train_rqvae.train.{name}")
         except ValueError:
             return default
+        if isinstance(v, gin.config.ConfigurableReference):
+            return v.scoped_configurable_fn()
+        return v
 
     return dict(
         input_dim=_q("vae_input_dim", 768),
