@@ -44,57 +44,90 @@ paper/                 — LaTeX source (CIKM 2026 submission)
 - **Instance quotas**: g5.xlarge on-demand=1 (shared), g5.4xlarge on-demand=30 (use this), g5.xlarge spot=5
 - **Midway auth**: credentials expire every ~10h; run `mwinit` to refresh before launching jobs
 
-## Checkpoint status (as of 2026-04-21)
+## Checkpoint status (as of 2026-04-22)
 
 | Dataset | RQ-VAE ckpt | Validation verdict | Decoder MTL ckpt |
 |---------|------------|--------|------------------|
-| Beauty  | `s3://REDACTED-BUCKET/rqvae-level-aware/checkpoints/rqvae_amazon_beauty/checkpoint_399999.pt` | ✅ HEALTHY: 248–256/256 unique SIDs per level, entropy 7.66–7.73 bits. Architecture per saved `model_config`: `ROTATION_TRICK + decoder.normalize=True + n_cat_feats=0`. | ✅ `s3://REDACTED-BUCKET/rqvae-level-aware/decoder-mtl/beauty/decoder-mtl-beauty-od-20260412-2036/output/model.tar.gz` |
-| Sports (pre-fork) | `trained_models/rqvae_amazon_sports/checkpoint_high_entropy.pt` | ❌ Collapsed under prior fork code | ⚠️ `decoder-mtl-sports-od4-20260415-1851` — retrain once Sports RQ-VAE is proven healthy |
-| Sports v6 / v7 | — | ❌ COLLAPSED under the (now reverted) L2-fix commit `57808c5`, which caused double normalization when combined with `decoder.normalize=True`. | — |
-| Steam   | TBD — sanity check pending (5k-step) | — | — |
-| Toys    | TBD — sanity check pending (5k-step) | — | — |
+| Beauty  | `s3://REDACTED-BUCKET/rqvae-level-aware/checkpoints/rqvae_amazon_beauty/checkpoint_399999.pt` | ✅ HEALTHY (validated 2026-04-21): 248–256/256 unique SIDs per level, entropy 7.66–7.73 bits. Saved `model_config` shows `ROTATION_TRICK + decoder.normalize=True + n_cat_feats=0`. | ✅ `s3://REDACTED-BUCKET/rqvae-level-aware/decoder-mtl/beauty/decoder-mtl-beauty-od-20260412-2036/output/model.tar.gz` — trained against this RQ-VAE; MTL+eval numbers remain valid. |
+| Sports (pre-fork) | `trained_models/rqvae_amazon_sports/checkpoint_high_entropy.pt` | ❌ Collapsed under prior fork code | ⚠️ `decoder-mtl-sports-od4-20260415-1851` — invalidated; retrain once Sports v(repro2) validates healthy |
+| Sports v6 / v7 | — | ❌ Collapsed under the since-reverted commit `57808c5` (L2-fix). Kept in S3 for reference only. | — |
+| Beauty / Sports / Toys repro (2026-04-22) | `s3://REDACTED-BUCKET/rqvae-level-aware/rqvae/{beauty,sports,toys}-repro/.../model.tar.gz` | ❌ Collapsed. Trained under the since-reverted commit `0449747` (`kmeans_initted` buffer) which interacted badly with `@torch.compile` on `RqVae.forward` — the compiled graph re-ran KMeans on every forward pass, resetting the codebook. Do **not** use. | — |
+| Beauty / Sports / Toys / Steam repro2 | Training in-flight (jobs `rqvae-{ds}-repro2-20260422-1*`) | Pending end-of-training validation | — |
 | ML1M    | `trained_models/rqvae_ml1m/checkpoint_399999.pt` | — | ❌ Incompatible data pipeline (different feature dims, split structure, max_seq_len) — **dropped** |
+
+Gate sequence once repro2 validations come back:
+
+1. All four HEALTHY → proceed to decoder-MTL training per dataset, then alpha search + eval sweep.
+2. Any collapsed → root-cause in `modules/rqvae.py` or `modules/quantize.py`, re-train, re-validate. Do **not** bypass the validator; Sports+Toys+Steam were previously dropped based on wrong diagnoses.
 
 ## Datasets (candidates for paper)
 
-- **Amazon Beauty**: ~22K users, ~12K items, auto-download. Known-healthy RQ-VAE.
-- **Amazon Sports**: ~35K users, ~18K items, auto-download. RQ-VAE retrain pending after revert.
-- **Amazon Toys**: ~19K users, ~12K items, auto-download. Sanity check pending.
-- **Steam**: ~334K users, ~13K items, HuggingFace download. Sanity check pending.
+- **Amazon Beauty**: ~22K users, ~12K items, auto-download. Known-healthy pre-fork RQ-VAE.
+- **Amazon Sports**: ~35K users, ~18K items, auto-download. Retraining in progress.
+- **Amazon Toys**: ~19K users, ~12K items, auto-download. Retraining in progress.
+- **Steam**: ~334K users, ~13K items, HuggingFace download. Retraining in progress.
 
 ## Data prep
 
-- Amazon (Beauty, Sports, Toys): auto-download via `AmazonReviews.download()` (one Google Drive zip covers all three splits). Preprocessed features cached at `s3://REDACTED-BUCKET/rqvae-level-aware/datasets/amazon/` for Beauty + Sports (Toys cache pending, see `sagemaker/launch/launch_preprocess_datasets.py`).
-- Steam: downloads from HuggingFace (UCSD mirror is 404). Preprocess + cache with `launch_preprocess_datasets.py --splits steam`.
+- Amazon (Beauty, Sports, Toys): auto-download via `AmazonReviews.download()` (single Google-Drive zip covers all three splits). Preprocessed features cached at `s3://REDACTED-BUCKET/rqvae-level-aware/datasets/amazon/` for Beauty + Sports + Toys.
+- Steam: downloads from HuggingFace (UCSD mirror is 404). Processed cache at `s3://REDACTED-BUCKET/rqvae-level-aware/datasets/steam/`.
+- (Re-)populate caches with `sagemaker/launch/launch_preprocess_datasets.py --splits <...>` then `--sync <job-name>`.
+- Training jobs that mount `s3://.../datasets/<name>/` as a `dataset` channel skip the ~30-60 min preprocessing step — `override_save_dir_for_sagemaker()` symlinks `SM_CHANNEL_DATASET` onto the gin-configured `dataset_folder`.
 - All datasets use leave-one-out split; 5-core filtering for Steam.
 - Sentence-T5 features are already L2-normalized (verified Beauty + Sports: norm 0.9995–1.0005).
 
 ## Known issues and workarounds
 
-### RQ-VAE codebook collapse — two root causes identified (2026-04-21)
+### RQ-VAE training — lessons learned (2026-04-22)
 
-1. **L2-norm bug for `n_cat_feats=0`** (fixed in commit `57808c5`). Previously
-   `modules/rqvae.py` did `torch.cat([l2norm(x_hat[..., :-0]), x_hat[..., -0:]])`
-   which returns un-normalized `x_hat` because Python slicing `[:-0]` is empty.
-   Reconstruction loss collapsed trivially (`rl → 0`, `vl → 0`) and the codebook
-   went unused. Affected Sports, Steam, Toys configs where `n_cat_feats=0`. Fix
-   special-cases `n_cat_feats == 0` to apply `l2norm` to the full reconstruction.
+Two earlier "fix" commits that produced the dropping of Sports/Steam/Toys
+have been reverted after independent sanity runs proved they were the
+cause, not the cure:
 
-2. **`ROTATION_TRICK` mode destabilises Sports** even with the L2-norm fix
-   applied. Sports v6 (`rotation_trick + kmeans + cw=0.25 + L2-fix`) produced
-   completely collapsed codebooks (1 unique SID per level). Beauty, trained
-   with `STE` and the same `n_cat_feats=0`, is healthy. Recommendation: use
-   `STE` for Amazon splits.
+1. **The L2-norm "fix" (commit `57808c5`, reverted in `f9b645a`)**
+   hypothesized that `torch.cat([l2norm(x_hat[..., :-0]), x_hat[..., -0:]])`
+   returns un-normalized `x_hat` for `n_cat_feats=0`. That is true at the
+   `torch.cat` level — but `self.decoder` is built with `normalize=True`,
+   so `x_hat` arrives already L2-normalized from the decoder MLP. Adding
+   an extra `l2norm(x_hat)` in an `else` branch introduced a double
+   normalization that altered autograd gradients enough to destabilise
+   Sports training (v6 and v7 both collapsed with all 3 levels pinned to
+   a single SID). Upstream EdoardoBotta/RQ-VAE-Recommender uses the
+   original `torch.cat` and trains cleanly on Amazon Beauty+Sports.
 
-3. **`kmeans_initted` was not persisted** (fixed in commit `0449747`).
-   `Quantize.kmeans_initted` used to be a plain Python bool, so loading a
-   trained RQ-VAE reset it to False and the first forward() re-ran KMeans
-   over whatever batch arrived first, silently overwriting the trained
-   codebook. This invalidates any reported metric that came from a reloaded
-   RQ-VAE (decoder baseline, decoder MTL, alpha search, eval sweep,
-   residual-entropy analysis). Fixed by registering it as a buffer and
-   adding a `load_state_dict` pre-hook that injects `True` for legacy
-   state dicts.
+2. **The `kmeans_initted` buffer change (commit `0449747`, reverted in
+   `4e0eb00`)** moved the Quantize layer's `kmeans_initted` from a Python
+   bool to a tensor buffer so it would persist across `load_state_dict`.
+   The buffer value gets captured at compile time by the
+   `@torch.compile(mode="reduce-overhead")` decorator on `RqVae.forward`
+   (CUDA-graph mode specializes the compiled graph on guard values).
+   In-place `kmeans_initted.fill_(True)` mutates tensor data, not the
+   captured Python value, so the compiled graph re-enters
+   `Quantize._kmeans_init(x=current_batch)` on **every** forward pass —
+   training effectively resets the codebook each iteration. All three
+   repro runs (Beauty+Sports+Toys, 400k steps each) finished with
+   `rl≈0.0013 vl=0.0000` and validated as completely collapsed.
+   The bool version works because attribute mutation is a recompile
+   trigger for `torch.compile`: after `_kmeans_init` sets
+   `self.kmeans_initted = True`, the next forward re-traces under a new
+   constant and takes the non-init branch.
+
+Load-time handling: the real problem the buffer commit tried to solve
+is legitimate — a loaded bool-attribute reverts to `False`, and the
+next forward call overwrites the trained codebook. It is handled today
+by setting `layer.do_kmeans_init = False` immediately after
+`load_state_dict`. `evaluate/validate_rqvae.py` does this; downstream
+eval / alpha-search scripts must do the same when they load the RQ-VAE
+manually (most already route through `SemanticIdTokenizer` which passes
+`codebook_kmeans_init=False`).
+
+### Beauty's actual architecture
+
+Beauty's healthy `checkpoint_399999.pt` was trained with
+`QuantizeForwardMode.ROTATION_TRICK` + `decoder.normalize=True`
+(verified from the saved `model_config`), not with `STE` as
+`configs/rqvae_amazon_beauty.gin` previously claimed. The four active
+configs now read `ROTATION_TRICK`.
 
 ### SageMaker dependency pins (requirements.txt)
 These are critical — relaxing them breaks SageMaker containers:
@@ -110,20 +143,25 @@ These are critical — relaxing them breaks SageMaker containers:
 - Spot instances on g5.xlarge/g5.2xlarge are unreliable (frequent interruptions, no checkpointing); use **g5.4xlarge on-demand** (30 instance quota)
 
 ### Toys dataset
-Dropped due to RQ-VAE codebook collapse: VQ loss=0.0 throughout training, inverted variance pattern (level 0 lowest, level 2 highest), decoder SID loss=0.0, all eval metrics=1.0. Root cause: KMeans init + STE mode on this particular data distribution.
+Retraining in progress (job `rqvae-toys-repro2-20260422-111026`). Prior drop notes listing "KMeans init + STE mode on this particular data distribution" as the cause were based on collapses produced by the since-reverted `0449747` buffer commit. Toys never actually exhibited architecture-specific incompatibility with this codebase — re-assess once the fresh training completes and validates.
 
 ### ML1M dataset
 Dropped due to pipeline incompatibilities: different feature dims (786 vs 768), missing `is_train`/`text` fields in data loader, different split structure (`eval` vs `test`), `max_seq_len=200` vs 20, CUDA index-out-of-bounds from padding. Would require significant data pipeline refactoring.
 
-## Pipeline stages (post-training)
+## Pipeline stages
 
 ```
-Decoder MTL complete (Beauty ✅, Sports ✅)
-  ├── Alpha grid search (per dataset) — scripts/alpha_grid_search.py
-  ├── Alpha learned (per dataset) — scripts/train_alpha_params.py
-  ├── Eval sweep (8 strategies × 3 datasets) — evaluate/run_eval.py
-  ├── Residual entropy analysis — modules/analysis/residual_entropy.py
-  └── Collect results → figures/tables → paper
+RQ-VAE training: repro2 jobs in flight for all four datasets
+  ↓ (gated on end-of-training validation via evaluate/validate_rqvae.py)
+Decoder baseline + MTL training (per dataset) — train_decoder.py / train_decoder_mtl.py
+  ↓
+Alpha grid search (per dataset) — scripts/alpha_grid_search.py
+Alpha learned (per dataset) — scripts/train_alpha_params.py
+  ↓
+Eval sweep (8 strategies × N datasets) — evaluate/run_eval.py
+Residual entropy analysis — modules/analysis/residual_entropy.py
+  ↓
+Collect results → figures/tables → paper
 ```
 
 ## Test suite
