@@ -33,6 +33,11 @@ TARGETS = {
         "configs/rqvae_amazon_sports_v7.gin",
         "rqvae/sports-v7/rqvae-sports-v7-20260421-101131/output/model.tar.gz",
     ),
+    "sports_prefork": (
+        "validate-rqvae-sports-prefork",
+        "configs/rqvae_amazon_sports.gin",
+        "checkpoints/rqvae_amazon_sports_prefork/checkpoint_high_entropy.pt",
+    ),
     "beauty_repro": (
         "validate-rqvae-beauty-repro",
         "configs/rqvae_amazon_beauty.gin",
