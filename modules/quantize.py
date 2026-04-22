@@ -93,15 +93,10 @@ class Quantize(nn.Module):
             if isinstance(m, nn.Embedding):
                 nn.init.uniform_(m.weight)
 
-    def _kmeans_initted_pre_hook(self, state_dict, prefix, *_args) -> None:
-        key = prefix + "kmeans_initted"
-        if key not in state_dict:
-            state_dict[key] = torch.tensor(True)
-
     @torch.no_grad
     def _kmeans_init(self, x) -> None:
         kmeans_init_(self.embedding.weight, x=x)
-        self.kmeans_initted.fill_(True)
+        self.kmeans_initted = True
 
     def get_item_embeddings(self, item_ids) -> Tensor:
         return self.out_proj(self.embedding(item_ids))
