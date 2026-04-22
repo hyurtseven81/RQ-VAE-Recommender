@@ -135,6 +135,11 @@ def validate(config_path: str, rqvae_checkpoint: str, output_dir: str,
 
     rqvae = RqVae(**model_cfg)
     rqvae.load_state_dict(state["model"])
+    # Disable in-forward KMeans trigger so the trained codebook isn't overwritten
+    # on the first call (kmeans_initted is a non-persisted Python attribute).
+    for layer in rqvae.layers:
+        layer.do_kmeans_init = False
+        layer.kmeans_initted = True
     rqvae = rqvae.to(device).eval()
     n_layers = rqvae.n_layers
     codebook_size = rqvae.codebook_size

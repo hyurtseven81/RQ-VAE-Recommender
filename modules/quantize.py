@@ -70,12 +70,7 @@ class Quantize(nn.Module):
         self.forward_mode = forward_mode
         self.distance_mode = distance_mode
         self.do_kmeans_init = do_kmeans_init
-        self.register_buffer("kmeans_initted", torch.tensor(False))
-        # Old checkpoints (pre-buffer) don't include kmeans_initted in their state dict.
-        # Assume a loaded checkpoint was already KMeans-initted, so injecting True here
-        # prevents the first forward() from re-running KMeans and overwriting the
-        # trained codebook.
-        self._register_load_state_dict_pre_hook(self._kmeans_initted_pre_hook)
+        self.kmeans_initted = False
 
         self.out_proj = nn.Sequential(
             nn.Linear(embed_dim, embed_dim, bias=False) if sim_vq else nn.Identity(),
