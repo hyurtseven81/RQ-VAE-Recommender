@@ -32,6 +32,21 @@ TARGETS = {
         "configs/rqvae_amazon_sports_v7.gin",
         f"{S3_BASE}/rqvae/sports-v7/rqvae-sports-v7-20260421-101131/output/model.tar.gz",
     ),
+    "beauty_repro": (
+        "validate-rqvae-beauty-repro",
+        "configs/rqvae_amazon_beauty.gin",
+        f"{S3_BASE}/rqvae/beauty-repro/rqvae-beauty-repro-20260422-084727/output/model.tar.gz",
+    ),
+    "sports_repro": (
+        "validate-rqvae-sports-repro",
+        "configs/rqvae_amazon_sports.gin",
+        f"{S3_BASE}/rqvae/sports-repro/rqvae-sports-repro-20260422-090910/output/model.tar.gz",
+    ),
+    "toys_repro": (
+        "validate-rqvae-toys-repro",
+        "configs/rqvae_amazon_toys.gin",
+        f"{S3_BASE}/rqvae/toys-repro/rqvae-toys-repro-20260422-092032/output/model.tar.gz",
+    ),
 }
 
 
