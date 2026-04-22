@@ -47,6 +47,26 @@ TARGETS = {
         "configs/rqvae_amazon_toys.gin",
         f"{S3_BASE}/rqvae/toys-repro/rqvae-toys-repro-20260422-092032/output/model.tar.gz",
     ),
+    "beauty_repro3": (
+        "validate-rqvae-beauty-repro3",
+        "configs/rqvae_amazon_beauty.gin",
+        f"{S3_BASE}/rqvae/beauty-repro3/rqvae-beauty-repro3-20260422-112851/output/model.tar.gz",
+    ),
+    "sports_repro3": (
+        "validate-rqvae-sports-repro3",
+        "configs/rqvae_amazon_sports.gin",
+        f"{S3_BASE}/rqvae/sports-repro3/rqvae-sports-repro3-20260422-113325/output/model.tar.gz",
+    ),
+    "toys_repro3": (
+        "validate-rqvae-toys-repro3",
+        "configs/rqvae_amazon_toys.gin",
+        f"{S3_BASE}/rqvae/toys-repro3/rqvae-toys-repro3-20260422-113756/output/model.tar.gz",
+    ),
+    "steam_repro3": (
+        "validate-rqvae-steam-repro3",
+        "configs/rqvae_steam.gin",
+        f"{S3_BASE}/rqvae/steam-repro3/rqvae-steam-repro3-20260422-120832/output/model.tar.gz",
+    ),
 }
 
 

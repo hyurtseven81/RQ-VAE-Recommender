@@ -49,16 +49,37 @@ paper/                 — LaTeX source (CIKM 2026 submission)
 | Dataset | RQ-VAE ckpt | Validation verdict | Decoder MTL ckpt |
 |---------|------------|--------|------------------|
 | Beauty  | `s3://REDACTED-BUCKET/rqvae-level-aware/checkpoints/rqvae_amazon_beauty/checkpoint_399999.pt` | ✅ HEALTHY (validated 2026-04-21): 248–256/256 unique SIDs per level, entropy 7.66–7.73 bits. Saved `model_config` shows `ROTATION_TRICK + decoder.normalize=True + n_cat_feats=0`. | ✅ `s3://REDACTED-BUCKET/rqvae-level-aware/decoder-mtl/beauty/decoder-mtl-beauty-od-20260412-2036/output/model.tar.gz` — trained against this RQ-VAE; MTL+eval numbers remain valid. |
-| Sports (pre-fork) | `trained_models/rqvae_amazon_sports/checkpoint_high_entropy.pt` | ❌ Collapsed under prior fork code | ⚠️ `decoder-mtl-sports-od4-20260415-1851` — invalidated; retrain once Sports v(repro2) validates healthy |
+| Sports (pre-fork) | `trained_models/rqvae_amazon_sports/checkpoint_high_entropy.pt` | ❌ Collapsed under prior fork code | ⚠️ `decoder-mtl-sports-od4-20260415-1851` — invalidated; retrain once a healthy Sports RQ-VAE exists
 | Sports v6 / v7 | — | ❌ Collapsed under the since-reverted commit `57808c5` (L2-fix). Kept in S3 for reference only. | — |
 | Beauty / Sports / Toys repro (2026-04-22) | `s3://REDACTED-BUCKET/rqvae-level-aware/rqvae/{beauty,sports,toys}-repro/.../model.tar.gz` | ❌ Collapsed. Trained under the since-reverted commit `0449747` (`kmeans_initted` buffer) which interacted badly with `@torch.compile` on `RqVae.forward` — the compiled graph re-ran KMeans on every forward pass, resetting the codebook. Do **not** use. | — |
-| Beauty / Sports / Toys / Steam repro3 | Training in-flight (jobs `rqvae-{ds}-repro3-20260422-1*`) | Pending end-of-training validation | — |
+| Beauty / Sports / Toys / Steam repro3 (2026-04-22 pm) | `s3://REDACTED-BUCKET/rqvae-level-aware/rqvae/{beauty,sports,toys,steam}-repro3/...` | ❌ All four validated as COLLAPSED (1 unique SID per level, entropy 0 bits, min_dist 0). Training curves look healthy up to ~step 5k (`vl` peaks around 0.05), then oscillate between steps 5k–12k and permanently settle to `vl=0` afterwards. Pattern is optimizer instability with ROTATION_TRICK + commitment_weight=0.25 on this data, not a load-time bug. The pre-fork healthy Beauty checkpoint used the same gin architecture, so the open question is what code change between then and now destabilised the optimization. | — |
 | ML1M    | `trained_models/rqvae_ml1m/checkpoint_399999.pt` | — | ❌ Incompatible data pipeline (different feature dims, split structure, max_seq_len) — **dropped** |
 
-Gate sequence once repro2 validations come back:
+Open questions after the repro3 round:
 
-1. All four HEALTHY → proceed to decoder-MTL training per dataset, then alpha search + eval sweep.
-2. Any collapsed → root-cause in `modules/rqvae.py` or `modules/quantize.py`, re-train, re-validate. Do **not** bypass the validator; Sports+Toys+Steam were previously dropped based on wrong diagnoses.
+1. Training curves do not match the pre-fork healthy run: healthy training should hold a
+   non-zero VQ loss across the entire horizon, not oscillate and collapse by step ~10k.
+2. Reverting the L2-norm fix (`f9b645a`) and the kmeans_initted buffer (`4e0eb00`) was
+   necessary — both commits reliably caused collapse — but neither is sufficient to get
+   training healthy again.
+3. `@torch.compile(mode="reduce-overhead")` on `RqVae.forward` is present in both the
+   healthy era and today, so that's not the likely differentiator, but we have not
+   directly tested disabling it.
+
+Next actions (in priority order):
+
+1. Bisect between `15126b7` (Apr 7 SageMaker wire-up, close to healthy-ckpt era) and
+   `HEAD` with a **single-variable test**: 5k training steps on Beauty against the
+   existing healthy gin config, compare VQ-loss curve. Do **not** chase multiple
+   variables in parallel again.
+2. In parallel, run one full training with `@torch.compile` disabled — if it validates
+   HEALTHY, we have a `torch.compile` + accelerate + ROTATION_TRICK interaction we
+   cannot safely keep.
+3. As a safety net, try `commitment_weight=0.1` — the 0.25 → 0.05 → 0 oscillation is
+   consistent with commitment loss overwhelming reconstruction once the encoder is
+   close enough to the codebook.
+4. Do **not** launch decoder-MTL / alpha-search / eval sweeps until at least one of
+   Beauty / Sports / Toys / Steam validates healthy at end-of-training.
 
 ## Datasets (candidates for paper)
 
@@ -143,7 +164,7 @@ These are critical — relaxing them breaks SageMaker containers:
 - Spot instances on g5.xlarge/g5.2xlarge are unreliable (frequent interruptions, no checkpointing); use **g5.4xlarge on-demand** (30 instance quota)
 
 ### Toys dataset
-Retraining in progress (job `rqvae-toys-repro2-20260422-111026`). Prior drop notes listing "KMeans init + STE mode on this particular data distribution" as the cause were based on collapses produced by the since-reverted `0449747` buffer commit. Toys never actually exhibited architecture-specific incompatibility with this codebase — re-assess once the fresh training completes and validates.
+repro3 run (`rqvae-toys-repro3-20260422-113756`) validated COLLAPSED — see repro3 row above. Prior drop notes listing "KMeans init + STE mode on this particular data distribution" as the cause were based on collapses produced by the since-reverted `0449747` buffer commit. Toys never actually exhibited architecture-specific incompatibility with this codebase — re-assess once the fresh training completes and validates.
 
 ### ML1M dataset
 Dropped due to pipeline incompatibilities: different feature dims (786 vs 768), missing `is_train`/`text` fields in data loader, different split structure (`eval` vs `test`), `max_seq_len=200` vs 20, CUDA index-out-of-bounds from padding. Would require significant data pipeline refactoring.
@@ -151,7 +172,7 @@ Dropped due to pipeline incompatibilities: different feature dims (786 vs 768), 
 ## Pipeline stages
 
 ```
-RQ-VAE training: repro2 jobs in flight for all four datasets
+RQ-VAE training: repro3 jobs all collapsed; root-causing before next round
   ↓ (gated on end-of-training validation via evaluate/validate_rqvae.py)
 Decoder baseline + MTL training (per dataset) — train_decoder.py / train_decoder_mtl.py
   ↓
