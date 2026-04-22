@@ -52,7 +52,7 @@ paper/                 — LaTeX source (CIKM 2026 submission)
 | Sports (pre-fork) | `trained_models/rqvae_amazon_sports/checkpoint_high_entropy.pt` | ❌ Collapsed under prior fork code | ⚠️ `decoder-mtl-sports-od4-20260415-1851` — invalidated; retrain once Sports v(repro2) validates healthy |
 | Sports v6 / v7 | — | ❌ Collapsed under the since-reverted commit `57808c5` (L2-fix). Kept in S3 for reference only. | — |
 | Beauty / Sports / Toys repro (2026-04-22) | `s3://REDACTED-BUCKET/rqvae-level-aware/rqvae/{beauty,sports,toys}-repro/.../model.tar.gz` | ❌ Collapsed. Trained under the since-reverted commit `0449747` (`kmeans_initted` buffer) which interacted badly with `@torch.compile` on `RqVae.forward` — the compiled graph re-ran KMeans on every forward pass, resetting the codebook. Do **not** use. | — |
-| Beauty / Sports / Toys / Steam repro2 | Training in-flight (jobs `rqvae-{ds}-repro2-20260422-1*`) | Pending end-of-training validation | — |
+| Beauty / Sports / Toys / Steam repro3 | Training in-flight (jobs `rqvae-{ds}-repro3-20260422-1*`) | Pending end-of-training validation | — |
 | ML1M    | `trained_models/rqvae_ml1m/checkpoint_399999.pt` | — | ❌ Incompatible data pipeline (different feature dims, split structure, max_seq_len) — **dropped** |
 
 Gate sequence once repro2 validations come back:
@@ -177,6 +177,19 @@ Known gaps: `tests/integration/` is empty, no `tests/data/test_steam_loader.py`.
 
 Strategies registered in `modules/decoding/__init__.py`:
 `vanilla`, `dbs`, `gumbel_topk`, `hybrid`, `level_aware_mix`, `level_aware_mix_grid`, `level_aware_mix_learned`, `sasrec_rerank`
+
+## Keeping this file up to date
+
+Update AGENTS.md whenever:
+- A training job completes or is dropped — update the checkpoint status table
+- A new dataset or config is added or removed
+- A dependency pin changes in `requirements.txt` (add to known issues if SageMaker-related)
+- A new decoding strategy is registered in `modules/decoding/__init__.py`
+- Pipeline stages change status (training → alpha search → eval → paper)
+- A new workaround or known issue is discovered
+
+The checkpoint status table and pipeline stages section are the most frequently stale — check them first.
+rec_rerank`
 
 ## Keeping this file up to date
 
