@@ -71,7 +71,7 @@ Next actions (in priority order):
 1. Bisect between `15126b7` (Apr 7 SageMaker wire-up, close to healthy-ckpt era) and
    `HEAD` with a **single-variable test**: 5k training steps on Beauty against the
    existing healthy gin config, compare VQ-loss curve. Do **not** chase multiple
-   variables in parallel again.
+   variables in parallel again. See `docs/bisect_runbook.md` for the launch commands.
 2. In parallel, run one full training with `@torch.compile` disabled — if it validates
    HEALTHY, we have a `torch.compile` + accelerate + ROTATION_TRICK interaction we
    cannot safely keep.
@@ -80,6 +80,28 @@ Next actions (in priority order):
    close enough to the codebook.
 4. Do **not** launch decoder-MTL / alpha-search / eval sweeps until at least one of
    Beauty / Sports / Toys / Steam validates healthy at end-of-training.
+
+### Bisect levers wired into the training loop
+
+All three planned experiments are selectable without editing source:
+
+- `train.vae_mlp_activation="silu"|"relu"|"gelu"` and `train.vae_decoder_normalize=True|False`
+  in the gin config. Together they can revert `a5367ed` (the only non-reverted commit
+  in the RQ-VAE training path since the healthy era). The saved `model_config` does
+  capture these going forward so validator reconstruction is faithful.
+- `RQVAE_DISABLE_COMPILE=1` as a container env var → `modules.rqvae._maybe_compile`
+  becomes an identity; `RqVae.forward` runs eagerly. Exposed on the two launchers as
+  `--disable-compile`.
+- `train.commitment_weight=0.1` (already gin-configurable).
+- Per-level training logs now include `residual_avg_norm_{0,1,2}` alongside the
+  existing `emb_avg_norm_{i}`. Watch for `||x||` shrinking or `||emb||` exploding in
+  the 5k window before VQ loss zeroes — that discriminates rotation-scale blow-up from
+  commitment-dominance.
+
+Pre-built Beauty bisect configs live next to the dataset config:
+
+- `configs/rqvae_amazon_beauty_bisect_a5367ed.gin` — ReLU + `decoder_normalize=False`.
+- `configs/rqvae_amazon_beauty_bisect_cw01.gin` — `commitment_weight=0.1`.
 
 ## Datasets (candidates for paper)
 
@@ -198,19 +220,6 @@ Known gaps: `tests/integration/` is empty, no `tests/data/test_steam_loader.py`.
 
 Strategies registered in `modules/decoding/__init__.py`:
 `vanilla`, `dbs`, `gumbel_topk`, `hybrid`, `level_aware_mix`, `level_aware_mix_grid`, `level_aware_mix_learned`, `sasrec_rerank`
-
-## Keeping this file up to date
-
-Update AGENTS.md whenever:
-- A training job completes or is dropped — update the checkpoint status table
-- A new dataset or config is added or removed
-- A dependency pin changes in `requirements.txt` (add to known issues if SageMaker-related)
-- A new decoding strategy is registered in `modules/decoding/__init__.py`
-- Pipeline stages change status (training → alpha search → eval → paper)
-- A new workaround or known issue is discovered
-
-The checkpoint status table and pipeline stages section are the most frequently stale — check them first.
-rec_rerank`
 
 ## Keeping this file up to date
 
