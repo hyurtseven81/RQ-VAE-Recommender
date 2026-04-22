@@ -1,3 +1,5 @@
+import functools
+import os
 from functools import cached_property
 from typing import NamedTuple
 
@@ -14,6 +16,16 @@ from modules.quantize import Quantize, QuantizeForwardMode
 
 torch.set_float32_matmul_precision("high")
 
+# Set RQVAE_DISABLE_COMPILE=1 to skip the torch.compile wrapper on RqVae.forward.
+# Bisect diagnostic for the repro3 collapse (AGENTS.md "Open questions"): the
+# healthy-era and current HEAD both compile forward, so this is unlikely to be
+# the differentiator, but we have not tested it directly.
+_maybe_compile = (
+    (lambda fn: fn)
+    if os.environ.get("RQVAE_DISABLE_COMPILE", "0") == "1"
+    else functools.partial(torch.compile, mode="reduce-overhead")
+)
+
 
 class RqVaeOutput(NamedTuple):
     embeddings: Tensor
@@ -28,6 +40,9 @@ class RqVaeComputedLosses(NamedTuple):
     rqvae_loss: Tensor
     embs_norm: Tensor
     p_unique_ids: Tensor
+    # Per-level ||residual|| pre-quantization, shape [B, H]. Used to diagnose
+    # rotation-trick scale collapse — see `docs/bisect_runbook.md`.
+    residuals_norm: Tensor
 
 
 class RqVae(nn.Module, PyTorchModelHubMixin):
@@ -44,6 +59,8 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
         n_layers: int = 3,
         commitment_weight: float = 0.25,
         n_cat_features: int = 18,
+        decoder_normalize: bool = True,
+        mlp_activation: str = "silu",
     ) -> None:
         self._config = locals()
 
@@ -77,13 +94,15 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
             hidden_dims=hidden_dims,
             out_dim=embed_dim,
             normalize=codebook_normalize,
+            activation=mlp_activation,
         )
 
         self.decoder = MLP(
             input_dim=embed_dim,
             hidden_dims=hidden_dims[-1::-1],
             out_dim=input_dim,
-            normalize=True,
+            normalize=decoder_normalize,
+            activation=mlp_activation,
         )
 
         self.reconstruction_loss = (
@@ -134,7 +153,7 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
             quantize_loss=quantize_loss,
         )
 
-    @torch.compile(mode="reduce-overhead")
+    @_maybe_compile
     def forward(self, batch: SeqBatch, gumbel_t: float) -> RqVaeComputedLosses:
         x = batch.x
         quantized = self.get_semantic_ids(x, gumbel_t)
@@ -152,6 +171,7 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
         with torch.no_grad():
             # Compute debug ID statistics
             embs_norm = embs.norm(dim=1)
+            residuals_norm = residuals.norm(dim=1)
             p_unique_ids = (
                 ~torch.triu(
                     (
@@ -168,4 +188,5 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
             rqvae_loss=rqvae_loss.mean(),
             embs_norm=embs_norm,
             p_unique_ids=p_unique_ids,
+            residuals_norm=residuals_norm,
         )

@@ -34,6 +34,7 @@ def get_estimator(
     instance_type: str,
     use_spot: bool,
     sess: sagemaker.Session,
+    disable_compile: bool = False,
 ) -> PyTorch:
     kwargs = dict(
         entry_point="train_rqvae.py",
@@ -51,6 +52,8 @@ def get_estimator(
             {"Key": "owner", "Value": "huseyin"},
         ],
     )
+    if disable_compile:
+        kwargs["environment"] = {"RQVAE_DISABLE_COMPILE": "1"}
     if use_spot:
         kwargs.update(
             use_spot_instances=True,
@@ -87,6 +90,12 @@ def main() -> None:
         help="S3 URI with preprocessed dataset cache (passed as 'dataset' channel). "
              "Pass empty string to force fresh preprocessing inside the container.",
     )
+    parser.add_argument(
+        "--disable-compile",
+        action="store_true",
+        help="Set RQVAE_DISABLE_COMPILE=1 in the container env so RqVae.forward "
+             "runs eagerly. Bisect diagnostic for the repro3 collapse.",
+    )
     args = parser.parse_args()
 
     boto_sess = boto3.Session(profile_name="REDACTED-PROFILE", region_name="us-east-1")
@@ -96,6 +105,7 @@ def main() -> None:
     output_subpath = f"{args.dataset}-{args.job_suffix}" if args.job_suffix else args.dataset
     estimator = get_estimator(
         args.dataset, gin_config, output_subpath, args.instance_type, args.spot, sess,
+        disable_compile=args.disable_compile,
     )
     inputs = {}
     if args.dataset_s3:

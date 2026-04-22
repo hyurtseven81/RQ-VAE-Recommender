@@ -53,6 +53,8 @@ def train(
     vae_sim_vq=False,
     vae_n_layers=3,
     dataset_split="beauty",
+    vae_decoder_normalize=True,
+    vae_mlp_activation="silu",
 ):
     if wandb_logging:
         params = locals()
@@ -131,6 +133,8 @@ def train(
         n_layers=vae_n_layers,
         n_cat_features=vae_n_cat_feats,
         commitment_weight=commitment_weight,
+        decoder_normalize=vae_decoder_normalize,
+        mlp_activation=vae_mlp_activation,
     )
 
     optimizer = AdamW(
@@ -219,8 +223,13 @@ def train(
             if accelerator.is_main_process and wandb_logging:
                 # Compute logs depending on training model_output here to avoid cuda graph overwrite from eval graph.
                 emb_norms_avg = model_output.embs_norm.mean(axis=0)
+                res_norms_avg = model_output.residuals_norm.mean(axis=0)
                 emb_norms_avg_log = {
                     f"emb_avg_norm_{i}": emb_norms_avg[i].cpu().item()
+                    for i in range(vae_n_layers)
+                }
+                res_norms_avg_log = {
+                    f"residual_avg_norm_{i}": res_norms_avg[i].cpu().item()
                     for i in range(vae_n_layers)
                 }
                 train_log = {
@@ -231,6 +240,7 @@ def train(
                     "temperature": t,
                     "p_unique_ids": model_output.p_unique_ids.cpu().item(),
                     **emb_norms_avg_log,
+                    **res_norms_avg_log,
                 }
 
             if do_eval and ((iter + 1) % eval_every == 0 or iter + 1 == iterations):
