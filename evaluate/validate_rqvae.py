@@ -56,6 +56,7 @@ def _read_train_params() -> dict:
     values; we resolve those by calling .scoped_configurable_fn().
     """
     import gin.config
+
     import train_rqvae  # noqa: F401 — ensure @gin.configurable decorator registers
 
     def _q(name, default):
