@@ -38,21 +38,30 @@ paper/                 — LaTeX source (CIKM 2026 submission)
 
 ## AWS / S3
 
-- **Bucket**: `s3://REDACTED-BUCKET/rqvae-level-aware/`
-- **AWS profile**: `REDACTED-PROFILE` (shared account 000000000000, role IibsAdminAccess-DO-NOT-DELETE)
-- **SageMaker execution role**: `arn:aws:iam::000000000000:role/REDACTED-ROLE`
-- **Instance quotas**: g5.xlarge on-demand=1 (shared), g5.4xlarge on-demand=30 (use this), g5.xlarge spot=5
-- **Midway auth**: credentials expire every ~10h; run `mwinit` to refresh before launching jobs
+Account-specific identifiers are read from environment variables so they
+never land in the repository. The launch scripts read them from
+`sagemaker/launch/_aws_env.py`; other scripts use `os.environ.get(...)`
+directly. Required on any machine that launches jobs:
+
+```
+export RQVAE_S3_BASE=s3://<your-bucket>/rqvae-level-aware   # required
+export RQVAE_SAGEMAKER_ROLE=arn:aws:iam::<acct-id>:role/<role-name>   # required
+export RQVAE_AWS_PROFILE=<boto3-profile-name>    # optional; falls back to AWS_PROFILE
+export RQVAE_AWS_REGION=us-east-1                # optional; falls back to AWS_REGION, then us-east-1
+```
+
+- **Instance quotas**: `g5.xlarge` on-demand=1 (shared), `g5.4xlarge` on-demand=30 (use this), `g5.xlarge` spot=5
+- **Auth refresh**: whatever your org requires (e.g. `mwinit`, `aws sso login --profile $RQVAE_AWS_PROFILE`) — credentials expire roughly every 10h
 
 ## Checkpoint status (as of 2026-04-22)
 
 | Dataset | RQ-VAE ckpt | Validation verdict | Decoder MTL ckpt |
 |---------|------------|--------|------------------|
-| Beauty  | `s3://REDACTED-BUCKET/rqvae-level-aware/checkpoints/rqvae_amazon_beauty/checkpoint_399999.pt` | ✅ HEALTHY (validated 2026-04-21): 248–256/256 unique SIDs per level, entropy 7.66–7.73 bits. Saved `model_config` shows `ROTATION_TRICK + decoder.normalize=True + n_cat_feats=0`. | ✅ `s3://REDACTED-BUCKET/rqvae-level-aware/decoder-mtl/beauty/decoder-mtl-beauty-od-20260412-2036/output/model.tar.gz` — trained against this RQ-VAE; MTL+eval numbers remain valid. |
+| Beauty  | `$RQVAE_S3_BASE/checkpoints/rqvae_amazon_beauty/checkpoint_399999.pt` | ✅ HEALTHY (validated 2026-04-21): 248–256/256 unique SIDs per level, entropy 7.66–7.73 bits. Saved `model_config` shows `ROTATION_TRICK + decoder.normalize=True + n_cat_feats=0`. | ✅ `$RQVAE_S3_BASE/decoder-mtl/beauty/decoder-mtl-beauty-od-20260412-2036/output/model.tar.gz` — trained against this RQ-VAE; MTL+eval numbers remain valid. |
 | Sports (pre-fork) | `trained_models/rqvae_amazon_sports/checkpoint_high_entropy.pt` | ❌ Collapsed under prior fork code | ⚠️ `decoder-mtl-sports-od4-20260415-1851` — invalidated; retrain once a healthy Sports RQ-VAE exists
 | Sports v6 / v7 | — | ❌ Collapsed under the since-reverted commit `57808c5` (L2-fix). Kept in S3 for reference only. | — |
-| Beauty / Sports / Toys repro (2026-04-22) | `s3://REDACTED-BUCKET/rqvae-level-aware/rqvae/{beauty,sports,toys}-repro/.../model.tar.gz` | ❌ Collapsed. Trained under the since-reverted commit `0449747` (`kmeans_initted` buffer) which interacted badly with `@torch.compile` on `RqVae.forward` — the compiled graph re-ran KMeans on every forward pass, resetting the codebook. Do **not** use. | — |
-| Beauty / Sports / Toys / Steam repro3 (2026-04-22 pm) | `s3://REDACTED-BUCKET/rqvae-level-aware/rqvae/{beauty,sports,toys,steam}-repro3/...` | ❌ All four validated as COLLAPSED (1 unique SID per level, entropy 0 bits, min_dist 0). Training curves look healthy up to ~step 5k (`vl` peaks around 0.05), then oscillate between steps 5k–12k and permanently settle to `vl=0` afterwards. Pattern is optimizer instability with ROTATION_TRICK + commitment_weight=0.25 on this data, not a load-time bug. The pre-fork healthy Beauty checkpoint used the same gin architecture, so the open question is what code change between then and now destabilised the optimization. | — |
+| Beauty / Sports / Toys repro (2026-04-22) | `$RQVAE_S3_BASE/rqvae/{beauty,sports,toys}-repro/.../model.tar.gz` | ❌ Collapsed. Trained under the since-reverted commit `0449747` (`kmeans_initted` buffer) which interacted badly with `@torch.compile` on `RqVae.forward` — the compiled graph re-ran KMeans on every forward pass, resetting the codebook. Do **not** use. | — |
+| Beauty / Sports / Toys / Steam repro3 (2026-04-22 pm) | `$RQVAE_S3_BASE/rqvae/{beauty,sports,toys,steam}-repro3/...` | ❌ All four validated as COLLAPSED (1 unique SID per level, entropy 0 bits, min_dist 0). Training curves look healthy up to ~step 5k (`vl` peaks around 0.05), then oscillate between steps 5k–12k and permanently settle to `vl=0` afterwards. Pattern is optimizer instability with ROTATION_TRICK + commitment_weight=0.25 on this data, not a load-time bug. The pre-fork healthy Beauty checkpoint used the same gin architecture, so the open question is what code change between then and now destabilised the optimization. | — |
 | ML1M    | `trained_models/rqvae_ml1m/checkpoint_399999.pt` | — | ❌ Incompatible data pipeline (different feature dims, split structure, max_seq_len) — **dropped** |
 
 Open questions after the repro3 round:
@@ -112,8 +121,8 @@ Pre-built Beauty bisect configs live next to the dataset config:
 
 ## Data prep
 
-- Amazon (Beauty, Sports, Toys): auto-download via `AmazonReviews.download()` (single Google-Drive zip covers all three splits). Preprocessed features cached at `s3://REDACTED-BUCKET/rqvae-level-aware/datasets/amazon/` for Beauty + Sports + Toys.
-- Steam: downloads from HuggingFace (UCSD mirror is 404). Processed cache at `s3://REDACTED-BUCKET/rqvae-level-aware/datasets/steam/`.
+- Amazon (Beauty, Sports, Toys): auto-download via `AmazonReviews.download()` (single Google-Drive zip covers all three splits). Preprocessed features cached at `$RQVAE_S3_BASE/datasets/amazon/` for Beauty + Sports + Toys.
+- Steam: downloads from HuggingFace (UCSD mirror is 404). Processed cache at `$RQVAE_S3_BASE/datasets/steam/`.
 - (Re-)populate caches with `sagemaker/launch/launch_preprocess_datasets.py --splits <...>` then `--sync <job-name>`.
 - Training jobs that mount `s3://.../datasets/<name>/` as a `dataset` channel skip the ~30-60 min preprocessing step — `override_save_dir_for_sagemaker()` symlinks `SM_CHANNEL_DATASET` onto the gin-configured `dataset_folder`.
 - All datasets use leave-one-out split; 5-core filtering for Steam.

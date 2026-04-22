@@ -3,7 +3,12 @@
 Run this once from the compute machine before launching SageMaker training jobs.
 All datasets are preprocessed and uploaded to:
 
-    s3://REDACTED-BUCKET/rqvae-level-aware/datasets/<dataset>/
+    $RQVAE_S3_BASE/datasets/<dataset>/
+
+Required env vars::
+
+    RQVAE_S3_BASE            e.g. s3://<your-bucket>/rqvae-level-aware
+    RQVAE_AWS_PROFILE        (optional) boto3 profile; falls back to AWS_PROFILE
 
 Usage::
 
@@ -19,9 +24,26 @@ import boto3
 import botocore
 
 
-S3_BUCKET = "REDACTED-BUCKET"
-S3_PREFIX = "rqvae-level-aware/datasets"
-AWS_PROFILE = "REDACTED-PROFILE"
+def _s3_base() -> str:
+    v = os.environ.get("RQVAE_S3_BASE", "").rstrip("/")
+    if not v or not v.startswith("s3://"):
+        raise RuntimeError(
+            "RQVAE_S3_BASE not set. Example: "
+            "export RQVAE_S3_BASE=s3://<your-bucket>/rqvae-level-aware"
+        )
+    return v
+
+
+def _s3_bucket_and_prefix() -> tuple[str, str]:
+    # Split s3://bucket/prefix/... into (bucket, prefix + "/datasets")
+    body = _s3_base().removeprefix("s3://")
+    parts = body.split("/", 1)
+    bucket = parts[0]
+    prefix = (parts[1] if len(parts) > 1 else "").strip("/")
+    return bucket, f"{prefix}/datasets" if prefix else "datasets"
+
+
+AWS_PROFILE = os.environ.get("RQVAE_AWS_PROFILE") or os.environ.get("AWS_PROFILE")
 
 DATASET_LOCAL_DIRS = {
     "amazon": "dataset/amazon",
@@ -119,14 +141,15 @@ def main() -> None:
 
     datasets = ALL_DATASETS if "all" in args.datasets else args.datasets
 
+    s3_bucket, s3_prefix = _s3_bucket_and_prefix()
     boto_sess = boto3.Session(profile_name=AWS_PROFILE)
     s3_client = boto_sess.client("s3")
 
     # Verify bucket is accessible
     try:
-        s3_client.head_bucket(Bucket=S3_BUCKET)
+        s3_client.head_bucket(Bucket=s3_bucket)
     except botocore.exceptions.ClientError as e:
-        print(f"ERROR: Cannot access s3://{S3_BUCKET} — {e}")
+        print(f"ERROR: Cannot access s3://{s3_bucket} — {e}")
         sys.exit(1)
 
     for dataset in datasets:
@@ -134,8 +157,8 @@ def main() -> None:
         print(f"\n{'=' * 60}")
         print(f"Dataset: {dataset}")
         print(f"Local dir: {local_dir}")
-        s3_dest = f"{S3_PREFIX}/{dataset}"
-        print(f"S3 dest: s3://{S3_BUCKET}/{s3_dest}")
+        s3_dest = f"{s3_prefix}/{dataset}"
+        print(f"S3 dest: s3://{s3_bucket}/{s3_dest}")
         print(f"{'=' * 60}")
 
         if not args.skip_preprocess:
@@ -145,7 +168,7 @@ def main() -> None:
             print(f"  [WARN] Local directory '{local_dir}' not found, skipping upload.")
             continue
 
-        upload_directory(s3_client, local_dir, S3_BUCKET, s3_dest)
+        upload_directory(s3_client, local_dir, s3_bucket, s3_dest)
 
     print("\nAll datasets processed and uploaded.")
 

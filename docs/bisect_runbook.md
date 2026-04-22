@@ -24,13 +24,11 @@ the validator so the verdict comes back as JSON alongside the SageMaker job.
 ## 0. Prereqs (one-time)
 
 ```bash
-# Anywhere you want the repo. Replace $YOUR_AWS_PROFILE, $YOUR_S3_BUCKET, and
-# $YOUR_SM_EXECUTION_ROLE below with the values for your account.
+# Clone + install. Python 3.11 preferred (matches the SageMaker container).
 git clone <this-repo> rqvae-bisect && cd rqvae-bisect
 git checkout develop
 git pull
 
-# Python 3.11 preferred (matches the SageMaker container the jobs run on).
 python -m venv .venv && source .venv/bin/activate
 pip install --upgrade pip
 pip install 'sagemaker>=2.230,<3' 'boto3>=1.34'
@@ -38,15 +36,25 @@ pip install 'sagemaker>=2.230,<3' 'boto3>=1.34'
 # SageMaker container.
 
 # Auth (whatever your org requires). Examples:
-mwinit              # Midway-protected accounts
-aws sso login --profile $YOUR_AWS_PROFILE
+#   mwinit                                     # Midway
+#   aws sso login --profile <your-profile>     # AWS SSO
 ```
 
-If your AWS profile / region / S3 bucket / execution-role ARN differ from the
-hard-coded defaults in `sagemaker/launch/launch_rqvae*.py`, either edit those
-constants once at the top of the file or export the overrides into your shell
-before launching — the launchers already read `boto3.Session(profile_name=...)`
-so a profile switch is enough for auth.
+### Environment variables
+
+All launch scripts read their AWS identifiers from env vars. **Export these
+before launching anything** — the launchers will raise a clear
+`RuntimeError` if `RQVAE_S3_BASE` or `RQVAE_SAGEMAKER_ROLE` is missing.
+
+```bash
+export RQVAE_S3_BASE="s3://<your-bucket>/rqvae-level-aware"          # required
+export RQVAE_SAGEMAKER_ROLE="arn:aws:iam::<acct-id>:role/<role-name>" # required
+export RQVAE_AWS_PROFILE="<your-boto3-profile>"                       # optional; falls back to AWS_PROFILE
+export RQVAE_AWS_REGION="us-east-1"                                   # optional; falls back to AWS_REGION then us-east-1
+```
+
+Nothing account-specific is hard-coded in the scripts themselves, so the same
+checkout can drive jobs in any AWS account by swapping these four vars.
 
 ## 1. Bisect experiment A — revert `a5367ed` (activation + decoder norm)
 
@@ -75,8 +83,8 @@ python sagemaker/launch/launch_rqvae_sanity.py \
 Verdicts:
 
 ```
-s3://$YOUR_S3_BUCKET/rqvae-sanity/beauty-bisect-baseline/.../output/model.tar.gz
-s3://$YOUR_S3_BUCKET/rqvae-sanity/beauty-bisect-a5367ed/.../output/model.tar.gz
+s3://<your-bucket>/rqvae-sanity/beauty-bisect-baseline/.../output/model.tar.gz
+s3://<your-bucket>/rqvae-sanity/beauty-bisect-a5367ed/.../output/model.tar.gz
 ```
 
 Inside each `model.tar.gz` is a `verdict.json` with per-level `unique_sids`,
@@ -136,9 +144,9 @@ SageMaker packs into `output/model.tar.gz`. Pull it back locally:
 
 ```bash
 aws s3 cp \
-    s3://$YOUR_S3_BUCKET/rqvae-sanity/beauty-bisect-a5367ed/<jobname>/output/model.tar.gz \
+    s3://<your-bucket>/rqvae-sanity/beauty-bisect-a5367ed/<jobname>/output/model.tar.gz \
     /tmp/bisect-a5367ed.tar.gz \
-    --profile $YOUR_AWS_PROFILE
+    --profile $RQVAE_AWS_PROFILE
 tar -xzf /tmp/bisect-a5367ed.tar.gz -C /tmp/ verdict.json
 cat /tmp/verdict.json
 ```

@@ -15,16 +15,13 @@ Usage::
 import argparse
 
 import boto3
-import sagemaker
-
+from _aws_env import aws_profile, aws_region, s3_base, sagemaker_role
 from sagemaker.pytorch import PyTorch
 
+import sagemaker
 
 DATASETS = ["beauty", "sports", "toys", "steam", "ml32m"]
 DEFAULT_DATASETS = ["beauty", "sports"]
-S3_BASE = "s3://REDACTED-BUCKET/rqvae-level-aware"
-
-
 def _gin_config(dataset: str) -> str:
     if dataset == "steam":
         return "configs/decoder_steam_mtl.gin"
@@ -41,14 +38,14 @@ def get_estimator(
     return PyTorch(
         entry_point="train_decoder_mtl.py",
         source_dir=".",
-        role="arn:aws:iam::000000000000:role/REDACTED-ROLE",
+        role=sagemaker_role(),
         instance_type=instance_type,
         instance_count=1,
         framework_version="2.5.1",
         py_version="py311",
         sagemaker_session=sess,
-        output_path=f"{S3_BASE}/decoder-mtl/{dataset}/",
-        checkpoint_s3_uri=f"{S3_BASE}/checkpoints/decoder-mtl/{dataset}/",
+        output_path=f"{s3_base()}/decoder-mtl/{dataset}/",
+        checkpoint_s3_uri=f"{s3_base()}/checkpoints/decoder-mtl/{dataset}/",
         use_spot_instances=True,
         max_run=72000,
         max_wait=144000,
@@ -79,7 +76,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    boto_sess = boto3.Session(profile_name="REDACTED-PROFILE", region_name="us-east-1")
+    boto_sess = boto3.Session(profile_name=aws_profile(), region_name=aws_region())
     sess = sagemaker.Session(boto_session=boto_sess)
 
     for dataset in args.datasets:
@@ -91,7 +88,7 @@ def main() -> None:
         )
         print(f"Launched MTL decoder job for dataset='{dataset}'")
 
-    print(f"\nAll jobs submitted. Monitor at: {S3_BASE}/decoder-mtl/")
+    print(f"\nAll jobs submitted. Monitor at: {s3_base()}/decoder-mtl/")
 
 
 if __name__ == "__main__":

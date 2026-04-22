@@ -15,7 +15,9 @@ per-user metrics, making paired bootstrap and per-segment analysis impossible):
 
 Usage (from the compute machine)::
 
-    python scripts/collect_results.py --bucket REDACTED-BUCKET --prefix rqvae-level-aware
+    # --bucket defaults to the bucket in $RQVAE_S3_BASE
+    python scripts/collect_results.py --prefix rqvae-level-aware
+    python scripts/collect_results.py --bucket <your-bucket> --prefix rqvae-level-aware
 """
 import argparse
 import json
@@ -102,8 +104,13 @@ def main():
     import pyarrow as pa  # lazy: not needed for helper tests
     import pyarrow.parquet as pq
 
+    # Default bucket is the one encoded in RQVAE_S3_BASE (shape s3://bucket/prefix).
+    default_bucket = None
+    env_base = os.environ.get("RQVAE_S3_BASE", "").removeprefix("s3://").strip("/")
+    if env_base:
+        default_bucket = env_base.split("/", 1)[0]
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bucket", default="REDACTED-BUCKET")
+    parser.add_argument("--bucket", default=default_bucket, required=default_bucket is None)
     parser.add_argument("--prefix", default="rqvae-level-aware")
     parser.add_argument("--local-results", default="results/raw_json")
     parser.add_argument(
