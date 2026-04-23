@@ -72,6 +72,29 @@ def override_save_dir_for_sagemaker():
             print(f"Linked dataset cache: {sm_dataset} -> {target}")
             break
 
+    # Mount the pretrained RQ-VAE channel, if any, as pretrained_rqvae_path.
+    # When the launcher passes --pretrained-rqvae as the `model` TrainingInput,
+    # SageMaker extracts it into /opt/ml/input/data/model/. Rebind the gin
+    # path so train() / train_mtl() load from there rather than the
+    # config-encoded default.
+    sm_model_channel = os.environ.get("SM_CHANNEL_MODEL")
+    if sm_model_channel:
+        import pathlib
+        model_dir = pathlib.Path(sm_model_channel)
+        pts = sorted(model_dir.rglob("*.pt"))
+        if pts:
+            ckpt = str(pts[0])
+            for fn_name in (
+                "train.pretrained_rqvae_path",
+                "train_mtl.pretrained_rqvae_path",
+            ):
+                try:
+                    gin.bind_parameter(fn_name, ckpt)
+                    print(f"Rebound {fn_name} -> {ckpt}")
+                    break
+                except ValueError:
+                    continue
+
 
 @torch.no_grad
 def compute_debug_metrics(

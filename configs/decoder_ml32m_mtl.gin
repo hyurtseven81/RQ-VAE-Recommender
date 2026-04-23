@@ -18,7 +18,6 @@ train_mtl.dataset=%data.processed.RecDataset.ML_32M
 train_mtl.force_dataset_process=False
 train_mtl.full_eval_every=5000
 train_mtl.partial_eval_every=5000
-train_mtl.dataset_split="beauty"
 train_mtl.t5_d_model=384
 train_mtl.t5_num_heads=6
 train_mtl.t5_d_ff=1024
