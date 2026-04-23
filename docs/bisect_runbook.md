@@ -1,10 +1,19 @@
-# RQ-VAE collapse bisect runbook
+# RQ-VAE collapse bisect runbook — PARKED
 
-Use this on a machine that has the AWS profile for the training account (the
-one whose SageMaker execution role you've been using), `mwinit` if you need
-Midway, and `git`. The three experiments below run as short SageMaker jobs
-(≤ 90 min each on `ml.g5.4xlarge`), so you can launch them in parallel and
-compare verdicts in S3.
+> **Status**: parked and orthogonal to the paper. The paper uses upstream
+> pre-trained RQ-VAE checkpoints (see `docs/paper_plan.md`); the fork's
+> own retraining attempts all collapsed, but the paper does not depend on
+> recovering a healthy fork training run. This file captures the
+> experiments that would diagnose the collapse if ever revisited.
+>
+> Do not launch these jobs as part of the CIKM 2026 work — they burn
+> SageMaker quota on something the paper doesn't claim to solve.
+> See `AGENTS.md` → "Parked: codebook-collapse investigation" for scope.
+
+Use this on a machine that has AWS creds, `git`, and the `.env` loaded.
+The three experiments below run as short SageMaker jobs (≤ 90 min each
+on `ml.g5.4xlarge`), can run in parallel, and return `verdict.json`
+alongside the SageMaker job output.
 
 ## Why this exists
 
@@ -16,7 +25,7 @@ L2-norm), and its "match Beauty arch" justification cannot be verified from
 the saved `model_config` because neither field is an `RqVae.__init__`
 kwarg at that era. The other two open hypotheses are a `@torch.compile` +
 ROTATION_TRICK interaction and commitment-loss dominance once the encoder
-approaches the codebook. See `AGENTS.md` → "Open questions".
+approaches the codebook.
 
 Each experiment below is a single-variable 5k-step sanity run, bundled with
 the validator so the verdict comes back as JSON alongside the SageMaker job.

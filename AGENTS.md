@@ -1,14 +1,35 @@
 # AGENTS.md — RQ-VAE Level-Aware Hybrid Decoding
 
-Key facts for AI assistants working in this repo. See `docs/implementation_plan.md` for full design decisions.
+Key facts for AI assistants working in this repo. See `docs/paper_plan.md`
+for the current two-stage experimental plan (CIKM 2026). Collapse-investigation
+material lives in `docs/bisect_runbook.md` and is **parked** — it is
+orthogonal to the paper contribution.
+
+## Paper thesis (scope)
+
+The contribution is **decoding strategies over RQ-VAE semantic IDs**, not the
+tokeniser. Upstream EdoardoBotta pre-trained RQ-VAE checkpoints are the
+fixed tokeniser layer; codebook collapse is a property of those checkpoints
+and is **not** something this paper claims to fix.
+
+- **Stage 1** — Recall@{5,10,20} + NDCG@{5,10,20} across α-free beam-search
+  strategies on a vanilla SID-only decoder (`train_decoder.py`).
+  Strategies: `vanilla`, `dbs`, `gumbel_topk`, `hybrid`, `sasrec_rerank`.
+- **Stage 2** — Same metrics with an MTL decoder (`train_decoder_mtl.py`,
+  SASRec auxiliary head) plus level-aware α mixing. Strategies:
+  `level_aware_mix{,_grid,_learned}`. Pilot 3³ → refined 5³ α grid, plus
+  learned-α variant.
+
+Datasets (all three): Amazon Beauty, Amazon Sports, MovieLens-32M — all
+from upstream `trained_models/` checkpoints.
 
 ## Architecture constants
 
 - **Codebook levels**: 3 (`n_hierarchies = 3`)
 - **Codes per level**: 256 (`num_embeddings_per_hierarchy = 256`)
-- **Codebook dim**: 32 (`embed_dim = 32`) — this is also `d_item` in SASRecAuxHead
+- **Codebook dim**: 32 (`embed_dim = 32`) — also `d_item` in SASRecAuxHead
 - **Decoder hidden dim**: 384 (`d_model = 384`)
-- **Beam search is sampling-based** (multinomial), NOT greedy. `generate()` uses `torch.multinomial`. n_cands raised to `min(200, vocab_size)`.
+- **Beam search is sampling-based** (multinomial), NOT greedy. `generate()` uses `torch.multinomial`. `n_cands` raised to `min(200, vocab_size)`.
 
 ## Critical invariants
 
@@ -19,10 +40,10 @@ Key facts for AI assistants working in this repo. See `docs/implementation_plan.
 
 ## Training
 
-- `train_decoder.py` — standard SID cross-entropy, no grad clipping
-- `train_decoder_mtl.py` — joint `L_sid + λ(t)·L_sasrec`; **grad clip norm 1.0** (deviation from vanilla); λ warmup 0→0.2 over first 10% of steps
-- SASRecAuxHead item embeddings are **initialized from RQ-VAE encoder outputs** (collaborative signal, 32-d), not from Sentence-T5 text embeddings like LIGER
-- Item features are truncated to `vae_input_dim` before passing to encoder (ML1M has 786-dim features but RQ-VAE uses 768)
+- `train_decoder.py` — SID-only cross-entropy, no grad clipping. Stage 1.
+- `train_decoder_mtl.py` — joint `L_sid + λ(t)·L_sasrec`; **grad clip norm 1.0** (deviation from vanilla); λ warmup 0→0.2 over first 10% of steps. Stage 2.
+- SASRecAuxHead item embeddings are **initialized from RQ-VAE encoder outputs** (collaborative signal, 32-d), not from Sentence-T5 text embeddings like LIGER.
+- Item features are truncated to `vae_input_dim` before passing to encoder (ML32M/ML1M have 786-dim features but RQ-VAE uses 768).
 
 ## Module layout
 
@@ -30,10 +51,11 @@ Key facts for AI assistants working in this repo. See `docs/implementation_plan.
 modules/decoding/      — beam search strategies (vanilla, dbs, gumbel, hybrid, level_aware_mix, sasrec_reranker)
 modules/heads/         — sasrec_head.py, mtl_losses.py
 modules/analysis/      — residual_entropy.py
-evaluate/              — metrics.py, stats.py, result_store.py, run_eval.py
+evaluate/              — metrics.py, stats.py, result_store.py, run_eval.py, validate_rqvae.py
 scripts/               — alpha_grid_search.py, train_alpha_params.py, make_figures.py, make_tables.py
-sagemaker/             — launch scripts for SageMaker training jobs
+sagemaker/             — launch scripts for SageMaker training + eval jobs
 paper/                 — LaTeX source (CIKM 2026 submission)
+docs/                  — paper_plan.md, bisect_runbook.md (parked), implementation_plan.md
 ```
 
 ## AWS / S3
@@ -50,194 +72,141 @@ export RQVAE_AWS_PROFILE=<boto3-profile-name>    # optional; falls back to AWS_P
 export RQVAE_AWS_REGION=us-east-1                # optional; falls back to AWS_REGION, then us-east-1
 ```
 
-- **Instance quotas**: `g5.xlarge` on-demand=1 (shared), `g5.4xlarge` on-demand=30 (use this), `g5.xlarge` spot=5
-- **Auth refresh**: whatever your org requires (e.g. `mwinit`, `aws sso login --profile $RQVAE_AWS_PROFILE`) — credentials expire roughly every 10h
+- **Instance quotas**: `g5.xlarge` on-demand=1 (shared), `g5.4xlarge` on-demand=30 (use this for RQ-VAE / validator), `g5.xlarge` spot=5 (fine for eval sweeps and α pilot).
+- **Auth refresh**: whatever your org requires (e.g. `mwinit`, `aws sso login --profile $RQVAE_AWS_PROFILE`) — credentials expire roughly every 10h.
 
-## Checkpoint status (as of 2026-04-22)
+## Datasets and upstream checkpoints
 
-| Dataset | RQ-VAE ckpt | Validation verdict | Decoder MTL ckpt |
-|---------|------------|--------|------------------|
-| Beauty  | `$RQVAE_S3_BASE/checkpoints/rqvae_amazon_beauty/checkpoint_399999.pt` | ✅ HEALTHY (validated 2026-04-21): 248–256/256 unique SIDs per level, entropy 7.66–7.73 bits. Saved `model_config` shows `ROTATION_TRICK + decoder.normalize=True + n_cat_feats=0`. | ✅ `$RQVAE_S3_BASE/decoder-mtl/beauty/decoder-mtl-beauty-od-20260412-2036/output/model.tar.gz` — trained against this RQ-VAE; MTL+eval numbers remain valid. |
-| Sports (pre-fork) | `trained_models/rqvae_amazon_sports/checkpoint_high_entropy.pt` | ❌ Collapsed under prior fork code | ⚠️ `decoder-mtl-sports-od4-20260415-1851` — invalidated; retrain once a healthy Sports RQ-VAE exists
-| Sports v6 / v7 | — | ❌ Collapsed under the since-reverted commit `57808c5` (L2-fix). Kept in S3 for reference only. | — |
-| Beauty / Sports / Toys repro (2026-04-22) | `$RQVAE_S3_BASE/rqvae/{beauty,sports,toys}-repro/.../model.tar.gz` | ❌ Collapsed. Trained under the since-reverted commit `0449747` (`kmeans_initted` buffer) which interacted badly with `@torch.compile` on `RqVae.forward` — the compiled graph re-ran KMeans on every forward pass, resetting the codebook. Do **not** use. | — |
-| Beauty / Sports / Toys / Steam repro3 (2026-04-22 pm) | `$RQVAE_S3_BASE/rqvae/{beauty,sports,toys,steam}-repro3/...` | ❌ All four validated as COLLAPSED (1 unique SID per level, entropy 0 bits, min_dist 0). Training curves look healthy up to ~step 5k (`vl` peaks around 0.05), then oscillate between steps 5k–12k and permanently settle to `vl=0` afterwards. Pattern is optimizer instability with ROTATION_TRICK + commitment_weight=0.25 on this data, not a load-time bug. The pre-fork healthy Beauty checkpoint used the same gin architecture, so the open question is what code change between then and now destabilised the optimization. | — |
-| ML1M    | `trained_models/rqvae_ml1m/checkpoint_399999.pt` | — | ❌ Incompatible data pipeline (different feature dims, split structure, max_seq_len) — **dropped** |
+Paper uses three datasets, all with upstream-committed RQ-VAE checkpoints
+from `EdoardoBotta/RQ-VAE-Recommender` under `trained_models/`. We do not
+retrain the RQ-VAE layer for the paper; we train only the decoder on top.
 
-Open questions after the repro3 round:
+| Dataset | Users | Items | Upstream RQ-VAE checkpoint | Codebook fingerprint (end-of-training validator output) |
+|---|---:|---:|---|---|
+| Amazon Beauty | ~22K | ~12K | `trained_models/rqvae_amazon_beauty/checkpoint_*.pt` | Healthy — 248–256/256 per level, entropy 7.66–7.73 bits (our 2026-04-21 validation) |
+| Amazon Sports | ~35K | ~18K | `trained_models/rqvae_amazon_sports/checkpoint_high_entropy.pt` | Partial collapse — L0: 33/256 (1.78 bits), L1: 96/256 (3.81 bits), L2: 134/256 (4.82 bits). Accepted as the "imperfect-codebook" reference. |
+| MovieLens-32M | ~200K | ~86K | `trained_models/rqvae_ml32m/checkpoint_high_entropy.pt` | **Unvalidated** — Stage 0 of the paper plan gates inclusion pending (a) validator fingerprint and (b) fork data pipeline compatibility check. |
 
-1. Training curves do not match the pre-fork healthy run: healthy training should hold a
-   non-zero VQ loss across the entire horizon, not oscillate and collapse by step ~10k.
-2. Reverting the L2-norm fix (`f9b645a`) and the kmeans_initted buffer (`4e0eb00`) was
-   necessary — both commits reliably caused collapse — but neither is sufficient to get
-   training healthy again.
-3. `@torch.compile(mode="reduce-overhead")` on `RqVae.forward` is present in both the
-   healthy era and today, so that's not the likely differentiator, but we have not
-   directly tested disabling it.
+Upstream HEAD's `trained_models/` is **not** tracked in this fork
+(`trained_models/` is in `.gitignore` since commit `6355423`). To fetch
+them locally:
 
-Next actions (in priority order):
+```bash
+git remote add upstream https://github.com/EdoardoBotta/RQ-VAE-Recommender.git
+git fetch upstream main
+git checkout upstream/main -- trained_models/
+# (then ignore / stash; do not commit)
+```
 
-1. Bisect between `15126b7` (Apr 7 SageMaker wire-up, close to healthy-ckpt era) and
-   `HEAD` with a **single-variable test**: 5k training steps on Beauty against the
-   existing healthy gin config, compare VQ-loss curve. Do **not** chase multiple
-   variables in parallel again. See `docs/bisect_runbook.md` for the launch commands.
-2. In parallel, run one full training with `@torch.compile` disabled — if it validates
-   HEALTHY, we have a `torch.compile` + accelerate + ROTATION_TRICK interaction we
-   cannot safely keep.
-3. As a safety net, try `commitment_weight=0.1` — the 0.25 → 0.05 → 0 oscillation is
-   consistent with commitment loss overwhelming reconstruction once the encoder is
-   close enough to the codebook.
-4. Do **not** launch decoder-MTL / alpha-search / eval sweeps until at least one of
-   Beauty / Sports / Toys / Steam validates healthy at end-of-training.
+### ML32M pipeline compatibility — known risks
 
-### Bisect levers wired into the training loop
+ML1M was previously dropped for five pipeline issues (AGENTS.md history).
+One is fixed (feature-dim truncation, commit `55abeba`). Four may still
+apply to ML32M and need a smoke check before decoder training:
 
-All three planned experiments are selectable without editing source:
+- Missing `is_train` / `text` fields in item data
+- Split-name mismatch (`eval` vs `test`)
+- `max_seq_len` padding (upstream used 200, fork uses 20)
+- CUDA index-out-of-bounds from padding tokens
 
-- `train.vae_mlp_activation="silu"|"relu"|"gelu"` and `train.vae_decoder_normalize=True|False`
-  in the gin config. Together they can revert `a5367ed` (the only non-reverted commit
-  in the RQ-VAE training path since the healthy era). The saved `model_config` does
-  capture these going forward so validator reconstruction is faithful.
-- `RQVAE_DISABLE_COMPILE=1` as a container env var → `modules.rqvae._maybe_compile`
-  becomes an identity; `RqVae.forward` runs eagerly. Exposed on the two launchers as
-  `--disable-compile`.
-- `train.commitment_weight=0.1` (already gin-configurable).
-- Per-level training logs now include `residual_avg_norm_{0,1,2}` alongside the
-  existing `emb_avg_norm_{i}`. Watch for `||x||` shrinking or `||emb||` exploding in
-  the 5k window before VQ loss zeroes — that discriminates rotation-scale blow-up from
-  commitment-dominance.
-
-Pre-built Beauty bisect configs live next to the dataset config:
-
-- `configs/rqvae_amazon_beauty_bisect_a5367ed.gin` — ReLU + `decoder_normalize=False`.
-- `configs/rqvae_amazon_beauty_bisect_cw01.gin` — `commitment_weight=0.1`.
-
-## Datasets (candidates for paper)
-
-- **Amazon Beauty**: ~22K users, ~12K items, auto-download. Known-healthy pre-fork RQ-VAE.
-- **Amazon Sports**: ~35K users, ~18K items, auto-download. Retraining in progress.
-- **Amazon Toys**: ~19K users, ~12K items, auto-download. Retraining in progress.
-- **Steam**: ~334K users, ~13K items, HuggingFace download. Retraining in progress.
+Gate: `docs/paper_plan.md` → Stage 0. Not blocked on resolving these
+today — just on deciding include/drop for ML32M.
 
 ## Data prep
 
-- Amazon (Beauty, Sports, Toys): auto-download via `AmazonReviews.download()` (single Google-Drive zip covers all three splits). Preprocessed features cached at `$RQVAE_S3_BASE/datasets/amazon/` for Beauty + Sports + Toys.
-- Steam: downloads from HuggingFace (UCSD mirror is 404). Processed cache at `$RQVAE_S3_BASE/datasets/steam/`.
-- (Re-)populate caches with `sagemaker/launch/launch_preprocess_datasets.py --splits <...>` then `--sync <job-name>`.
-- Training jobs that mount `s3://.../datasets/<name>/` as a `dataset` channel skip the ~30-60 min preprocessing step — `override_save_dir_for_sagemaker()` symlinks `SM_CHANNEL_DATASET` onto the gin-configured `dataset_folder`.
-- All datasets use leave-one-out split; 5-core filtering for Steam.
+- **Amazon (Beauty, Sports)**: auto-download via `AmazonReviews.download()` (single Google-Drive zip covers both splits plus Toys if ever needed). Preprocessed features cached at `$RQVAE_S3_BASE/datasets/amazon/` for Beauty + Sports.
+- **MovieLens-32M**: auto-download via `RawMovieLens32M` in `data/ml32m.py`. Caching policy TBD — part of Stage 0.
+- Training jobs that mount `s3://.../datasets/<name>/` as a `dataset` channel skip preprocessing — `override_save_dir_for_sagemaker()` symlinks `SM_CHANNEL_DATASET` onto the gin-configured `dataset_folder`.
+- All datasets use leave-one-out split.
 - Sentence-T5 features are already L2-normalized (verified Beauty + Sports: norm 0.9995–1.0005).
-
-## Known issues and workarounds
-
-### RQ-VAE training — lessons learned (2026-04-22)
-
-Two earlier "fix" commits that produced the dropping of Sports/Steam/Toys
-have been reverted after independent sanity runs proved they were the
-cause, not the cure:
-
-1. **The L2-norm "fix" (commit `57808c5`, reverted in `f9b645a`)**
-   hypothesized that `torch.cat([l2norm(x_hat[..., :-0]), x_hat[..., -0:]])`
-   returns un-normalized `x_hat` for `n_cat_feats=0`. That is true at the
-   `torch.cat` level — but `self.decoder` is built with `normalize=True`,
-   so `x_hat` arrives already L2-normalized from the decoder MLP. Adding
-   an extra `l2norm(x_hat)` in an `else` branch introduced a double
-   normalization that altered autograd gradients enough to destabilise
-   Sports training (v6 and v7 both collapsed with all 3 levels pinned to
-   a single SID). Upstream EdoardoBotta/RQ-VAE-Recommender uses the
-   original `torch.cat` and trains cleanly on Amazon Beauty+Sports.
-
-2. **The `kmeans_initted` buffer change (commit `0449747`, reverted in
-   `4e0eb00`)** moved the Quantize layer's `kmeans_initted` from a Python
-   bool to a tensor buffer so it would persist across `load_state_dict`.
-   The buffer value gets captured at compile time by the
-   `@torch.compile(mode="reduce-overhead")` decorator on `RqVae.forward`
-   (CUDA-graph mode specializes the compiled graph on guard values).
-   In-place `kmeans_initted.fill_(True)` mutates tensor data, not the
-   captured Python value, so the compiled graph re-enters
-   `Quantize._kmeans_init(x=current_batch)` on **every** forward pass —
-   training effectively resets the codebook each iteration. All three
-   repro runs (Beauty+Sports+Toys, 400k steps each) finished with
-   `rl≈0.0013 vl=0.0000` and validated as completely collapsed.
-   The bool version works because attribute mutation is a recompile
-   trigger for `torch.compile`: after `_kmeans_init` sets
-   `self.kmeans_initted = True`, the next forward re-traces under a new
-   constant and takes the non-init branch.
-
-Load-time handling: the real problem the buffer commit tried to solve
-is legitimate — a loaded bool-attribute reverts to `False`, and the
-next forward call overwrites the trained codebook. It is handled today
-by setting `layer.do_kmeans_init = False` immediately after
-`load_state_dict`. `evaluate/validate_rqvae.py` does this; downstream
-eval / alpha-search scripts must do the same when they load the RQ-VAE
-manually (most already route through `SemanticIdTokenizer` which passes
-`codebook_kmeans_init=False`).
-
-### Beauty's actual architecture
-
-Beauty's healthy `checkpoint_399999.pt` was trained with
-`QuantizeForwardMode.ROTATION_TRICK` + `decoder.normalize=True`
-(verified from the saved `model_config`), not with `STE` as
-`configs/rqvae_amazon_beauty.gin` previously claimed. The four active
-configs now read `ROTATION_TRICK`.
-
-### SageMaker dependency pins (requirements.txt)
-These are critical — relaxing them breaks SageMaker containers:
-- `polars==1.9.0` — newer versions change `.list.to_array()` return type from List to Array, breaking `_df_to_tensor_dict`
-- `wandb>=0.19.0,<0.25` — wandb 0.25+ requires protobuf>=6.32.1 but SM container has 6.31.1; crashes at import time before `WANDB_MODE=disabled` takes effect
-- `gin_config==0.5.0` — exact pin required
-- Do NOT pin `triton` — SM container ships the correct version for its torch build; overriding it breaks `torch._inductor`
-
-### SageMaker runtime
-- `override_save_dir_for_sagemaker()` in `modules/utils.py` redirects output to `/opt/ml/model/` and disables wandb when no API key is present
-- `parse_config()` accepts both positional args (local) and `--config_path` flag (SageMaker)
-- `source_dir="."` uploads the entire repo including `trained_models/` — keep only final checkpoints there
-- Spot instances on g5.xlarge/g5.2xlarge are unreliable (frequent interruptions, no checkpointing); use **g5.4xlarge on-demand** (30 instance quota)
-
-### Toys dataset
-repro3 run (`rqvae-toys-repro3-20260422-113756`) validated COLLAPSED — see repro3 row above. Prior drop notes listing "KMeans init + STE mode on this particular data distribution" as the cause were based on collapses produced by the since-reverted `0449747` buffer commit. Toys never actually exhibited architecture-specific incompatibility with this codebase — re-assess once the fresh training completes and validates.
-
-### ML1M dataset
-Dropped due to pipeline incompatibilities: different feature dims (786 vs 768), missing `is_train`/`text` fields in data loader, different split structure (`eval` vs `test`), `max_seq_len=200` vs 20, CUDA index-out-of-bounds from padding. Would require significant data pipeline refactoring.
 
 ## Pipeline stages
 
 ```
-RQ-VAE training: repro3 jobs all collapsed; root-causing before next round
-  ↓ (gated on end-of-training validation via evaluate/validate_rqvae.py)
-Decoder baseline + MTL training (per dataset) — train_decoder.py / train_decoder_mtl.py
+docs/paper_plan.md Stage 0      — ckpt inventory + ML32M pipeline gate
   ↓
-Alpha grid search (per dataset) — scripts/alpha_grid_search.py
-Alpha learned (per dataset) — scripts/train_alpha_params.py
+Stage 1 vanilla decoder × 3     — train_decoder.py per dataset
+  + α-free eval sweep           — evaluate/run_eval.py × 5 strategies × 3 datasets
   ↓
-Eval sweep (8 strategies × N datasets) — evaluate/run_eval.py
-Residual entropy analysis — modules/analysis/residual_entropy.py
+Stage 2 MTL decoder × 3         — train_decoder_mtl.py per dataset
+  + α pilot grid 3³             — scripts/alpha_grid_search.py (pilot stage)
+  + α refined grid 5³           — scripts/alpha_grid_search.py (refine stage)
+  + learned α                   — scripts/train_alpha_params.py
   ↓
-Collect results → figures/tables → paper
+scripts/collect_results.py      — aggregate parquets
+scripts/make_tables.py          — paper tables
+scripts/make_figures.py         — α heatmaps
 ```
+
+Stage 1 and Stage 2 can run in parallel once Stage 0 confirms checkpoints
+are loadable.
+
+## Known issues and workarounds
+
+### SageMaker dependency pins (requirements.txt)
+Critical — relaxing them breaks SageMaker containers:
+- `polars==1.9.0` — newer versions change `.list.to_array()` return type from List to Array, breaking `_df_to_tensor_dict`.
+- `wandb>=0.19.0,<0.25` — wandb 0.25+ requires protobuf>=6.32.1 but SM container has 6.31.1; crashes at import time before `WANDB_MODE=disabled` takes effect.
+- `gin_config==0.5.0` — exact pin required.
+- Do NOT pin `triton` — SM container ships the correct version for its torch build; overriding it breaks `torch._inductor`.
+
+### SageMaker runtime
+- `override_save_dir_for_sagemaker()` in `modules/utils.py` redirects output to `/opt/ml/model/` and disables wandb when no API key is present.
+- `parse_config()` accepts both positional args (local) and `--config_path` flag (SageMaker).
+- `source_dir="."` uploads the entire repo — keep `trained_models/` git-ignored but present locally so it's included in the SageMaker upload.
+- Spot instances on g5.xlarge/g5.2xlarge are unreliable (frequent interruptions, no checkpointing); use **g5.4xlarge on-demand** for RQ-VAE / validator jobs. Spot is fine for short eval jobs where an interruption just retries.
+
+### Load-time RQ-VAE handling
+Downstream scripts that load an RQ-VAE checkpoint manually must set
+`layer.do_kmeans_init = False` on each `Quantize` layer immediately after
+`load_state_dict`. `evaluate/validate_rqvae.py` does this. Most other
+callers route through `SemanticIdTokenizer` which passes
+`codebook_kmeans_init=False`. If you add a new loader, do the same.
+
+### ML1M dataset
+Dropped for this paper — five pipeline incompatibilities (see "ML32M
+pipeline compatibility" above). MovieLens-32M is the substitute.
+
+## Parked: codebook-collapse investigation
+
+The fork attempted four rounds of RQ-VAE retraining (`repro`, `repro2`,
+`repro3`, `sports_v{6,7}`) and all validated as collapsed despite two
+reverts (`f9b645a` for the L2-norm "fix", `4e0eb00` + `baa1190` for the
+`kmeans_initted` buffer). The precise cause remains undiagnosed.
+
+This does **not** affect the paper. The paper uses upstream pre-trained
+RQ-VAE checkpoints — fork retraining is not on the critical path.
+See `docs/bisect_runbook.md` for the experiments that would diagnose the
+collapse if ever revisited. The bisect levers
+(`train.vae_mlp_activation`, `train.vae_decoder_normalize`,
+`RQVAE_DISABLE_COMPILE` env var, `configs/rqvae_amazon_beauty_bisect_*.gin`)
+remain wired in but are unused.
 
 ## Test suite
 
 ```bash
-pytest tests/ -q                    # 92 tests across 12 test files
+pytest tests/ -q
 pytest tests/ --cov --cov-fail-under=80
 ```
 
-Known gaps: `tests/integration/` is empty, no `tests/data/test_steam_loader.py`.
+Known gaps: `tests/integration/` is empty, no `tests/data/test_steam_loader.py`,
+no `tests/data/test_ml32m_loader.py`.
 
 ## Decoding strategy registry
 
 Strategies registered in `modules/decoding/__init__.py`:
-`vanilla`, `dbs`, `gumbel_topk`, `hybrid`, `level_aware_mix`, `level_aware_mix_grid`, `level_aware_mix_learned`, `sasrec_rerank`
+
+- **Stage 1 (α-free)**: `vanilla`, `dbs`, `gumbel_topk`, `hybrid`, `sasrec_rerank`
+- **Stage 2 (level-aware α)**: `level_aware_mix`, `level_aware_mix_grid`, `level_aware_mix_learned`
 
 ## Keeping this file up to date
 
 Update AGENTS.md whenever:
-- A training job completes or is dropped — update the checkpoint status table
-- A new dataset or config is added or removed
-- A dependency pin changes in `requirements.txt` (add to known issues if SageMaker-related)
-- A new decoding strategy is registered in `modules/decoding/__init__.py`
-- Pipeline stages change status (training → alpha search → eval → paper)
-- A new workaround or known issue is discovered
+- A Stage-0/1/2 milestone completes — update dataset fingerprints, add decoder ckpt URIs to the datasets table.
+- A new dataset is added or dropped (Stage 0 may drop ML32M; propagate here).
+- A dependency pin changes in `requirements.txt` (add to known issues if SageMaker-related).
+- A new decoding strategy is registered in `modules/decoding/__init__.py`.
+- A new workaround or known issue is discovered.
 
-The checkpoint status table and pipeline stages section are the most frequently stale — check them first.
+The datasets table and pipeline stages section are the most frequently
+stale — check them first.
