@@ -128,77 +128,64 @@ For each dataset that cleared Stage 0:
 
 ```bash
 set -a; source .env; set +a
-python sagemaker/launch/launch_decoder.py \
-    --datasets beauty sports ml32m \
-    --pretrained-rqvae "$RQVAE_S3_BASE/checkpoints/rqvae_beauty_upstream/checkpoint_high_entropy.pt"
-```
-
-Wait — that launches a single dataset. For three datasets with distinct
-RQ-VAE checkpoints, run three separate invocations:
-
-```bash
+# Each dataset uses a distinct upstream RQ-VAE, so launch per-dataset.
 for d in beauty sports ml32m; do
     python sagemaker/launch/launch_decoder.py --datasets "$d" \
         --pretrained-rqvae "$RQVAE_S3_BASE/checkpoints/rqvae_${d}_upstream/checkpoint_high_entropy.pt"
 done
 ```
 
-Each launches a spot `ml.g5.2xlarge` training with `max_run=20h`,
-`max_wait=40h`. Expect ~12–20 h wall-clock per dataset. Monitor with §M1.
+Each launches a spot `ml.g5.2xlarge` training. Expect ~12–20 h wall-clock
+per dataset. Monitor with §M1.
 
 ### 1.2 Eval sweep — alpha-free strategies
 
-Once the three decoder checkpoints are in
+Once the three decoder checkpoints have landed in
 `$RQVAE_S3_BASE/decoder/<dataset>/<job>/output/model.tar.gz`, run the
-alpha-free eval sweep. Strategies:
-
-```
-vanilla   dbs   gumbel_topk   hybrid   sasrec_rerank
-```
-
-The launcher is `sagemaker/launch/launch_decoding_eval.py` (already wired
-per AGENTS.md). It expects (dataset, decoder-ckpt-S3, rqvae-ckpt-S3,
-strategy-name) per job. Example:
+alpha-free eval sweep. `launch_decoding_eval.py` fans out to
+`cardinality(--datasets) × cardinality(--strategies)` jobs and
+auto-discovers the most recently modified decoder + RQ-VAE ckpts per
+dataset.
 
 ```bash
 set -a; source .env; set +a
-for d in beauty sports ml32m; do
-  for s in vanilla dbs gumbel_topk hybrid sasrec_rerank; do
-    python sagemaker/launch/launch_decoding_eval.py \
-        --dataset "$d" \
-        --strategy "$s" \
-        --decoder-ckpt "$RQVAE_S3_BASE/decoder/${d}/decoder-${d}/output/model.tar.gz" \
-        --rqvae-ckpt "$RQVAE_S3_BASE/checkpoints/rqvae_${d}_upstream/checkpoint_high_entropy.pt"
-  done
-done
+
+# 4 alpha-free strategies × 3 datasets = 12 jobs.
+python sagemaker/launch/launch_decoding_eval.py \
+    --datasets beauty sports ml32m \
+    --strategies vanilla dbs gumbel_topk hybrid \
+    --decoder-variant baseline
 ```
 
-(If `launch_decoding_eval.py`'s CLI shape differs, the agent should read
-it first and adjust. The launcher is in the repo; do not invent commands
-it does not support.)
+Each job is ~1 h on `ml.g5.xlarge` spot. Monitor with §M2 (filter on
+`eval-baseline-` or just `eval-`).
 
-5 strategies × 3 datasets = 15 jobs, each ~1 h on `ml.g5.xlarge` spot. Run
-them in parallel; monitor with §M2.
+**`sasrec_rerank` note**: this strategy needs a SASRec aux head, so run it
+against the **Stage 2 MTL decoder** once Stage 2.1 completes. The
+launcher will auto-upgrade `--decoder-variant` to `mtl` when you ask for
+`sasrec_rerank` (or any level-aware variant):
 
-Note for `sasrec_rerank`: this strategy reranks the top-B beams by SASRec
-dense scores and **requires a trained SASRec head**. Since Stage 1 uses a
-vanilla decoder (no aux head), for this one strategy use the Stage 2 MTL
-decoder ckpt (after Stage 2 completes) as the rerank oracle, and flag
-this in the paper's method section. For ordering: skip `sasrec_rerank` in
-the first Stage 1 sweep and run it once Stage 2 is done.
+```bash
+# After Stage 2.1 has MTL decoders ready:
+python sagemaker/launch/launch_decoding_eval.py \
+    --datasets beauty sports ml32m \
+    --strategies sasrec_rerank
+```
 
 ### 1.3 Aggregate Stage 1 results
 
 ```bash
 PYTHONPATH=. python scripts/collect_results.py \
-    --bucket "$(echo $RQVAE_S3_BASE | sed 's|s3://||' | cut -d/ -f1)" \
-    --prefix rqvae-level-aware \
+    --prefix rqvae-level-aware/eval-results/baseline \
     --aggregate-output results/stage1/all_runs.parquet \
     --per-user-output results/stage1/per_user_runs.parquet
 ```
 
-Confirm the resulting parquet has 4 strategies × 3 datasets = 12 rows
-(plus sasrec_rerank added in step 1.2 when Stage 2 lands, so 15 total).
+(Bucket defaults to the one encoded in `$RQVAE_S3_BASE`.)
+
+Confirm the resulting parquet has 4 strategies × 3 datasets = 12 rows.
+Add `sasrec_rerank` rows once its MTL-decoder eval lands (step 1.2
+second invocation).
 
 ---
 
@@ -223,67 +210,77 @@ Stage 2 being done.
 
 ### 2.2 Alpha pilot — 3³ grid per dataset
 
+Each alpha-search job builds the MTL decoder + RQ-VAE once and iterates
+through the entire alpha grid internally — one SageMaker job per dataset,
+not per alpha point. MTL decoder + RQ-VAE checkpoints are auto-discovered.
+
 ```bash
 set -a; source .env; set +a
+python sagemaker/launch/launch_alpha_search.py \
+    --datasets beauty sports ml32m \
+    --alpha-grid "0.0,0.5,1.0" \
+    --job-suffix pilot
+```
+
+3 jobs, each iterating 27 alpha points (3³). Expect ~2–4 h per job on
+`ml.g5.xlarge` spot. Monitor with §M2 (filter on `alpha-` name prefix).
+
+Once each job completes, pull its output CSV and pick the pilot winner:
+
+```bash
 for d in beauty sports ml32m; do
-  python sagemaker/launch/launch_alpha_search.py \
-      --dataset "$d" \
-      --variant grid \
-      --alpha-levels "0,0.5,1.0" \
-      --mtl-ckpt "$RQVAE_S3_BASE/decoder-mtl/${d}/decoder-mtl-${d}/output/model.tar.gz"
+    aws s3 cp --recursive \
+        "$RQVAE_S3_BASE/alpha-search/${d}-pilot/" \
+        "results/stage2/alpha_${d}_pilot/" \
+        --profile "$RQVAE_AWS_PROFILE"
+    python -c "
+import pandas as pd, glob, os
+csv = sorted(glob.glob('results/stage2/alpha_${d}_pilot/**/*.csv', recursive=True))[-1]
+df = pd.read_csv(csv).sort_values('recall_at_10', ascending=False)
+print('${d} pilot winner:', df.iloc[0].to_dict())
+"
 done
 ```
 
-27 alpha points × 3 datasets = 81 jobs, each ~1 h on `ml.g5.xlarge` spot.
-Monitor with §M2.
-
-(If `launch_alpha_search.py`'s flags differ, the agent should read it and
-adjust — the CLI must support grid evaluation with a per-level list and
-an MTL checkpoint URI.)
-
-Once jobs complete, pick the pilot winner per dataset (highest NDCG@10)
-and record the alpha triple.
+Record each dataset's pilot winner for step 2.3.
 
 ### 2.3 Alpha refine — 5³ centred on pilot winner
 
-Re-run `launch_alpha_search.py` with a 5-point grid per level centred
-on the pilot winner, step 0.1, clipped to [0, 1]. For each dataset:
+Per-dataset refined grid (step 0.1, clipped to [0,1]), example shown for
+a hypothetical Beauty pilot winner of (0.5, 0.5, 0.0):
 
 ```bash
-# Example: pilot winner for beauty was (0.5, 0.5, 0.0), step 0.1 gives:
 python sagemaker/launch/launch_alpha_search.py \
-    --dataset beauty \
-    --variant grid \
+    --datasets beauty \
     --alpha0-grid "0.3,0.4,0.5,0.6,0.7" \
     --alpha1-grid "0.3,0.4,0.5,0.6,0.7" \
     --alpha2-grid "0.0,0.1,0.2,0.3,0.4" \
-    --mtl-ckpt "$RQVAE_S3_BASE/decoder-mtl/beauty/decoder-mtl-beauty/output/model.tar.gz"
+    --job-suffix refined
 ```
 
-125 points × 3 datasets = 375 jobs, each ~1 h spot. Monitor with §M2.
+Run once per dataset with grids centred on that dataset's pilot winner.
+3 jobs, each iterating 125 alpha points (5³). Expect ~6–10 h per job on
+`ml.g5.xlarge` spot.
 
-### 2.4 Learned alpha
+### 2.4 Learned alpha — deferred (requires a launcher)
 
-One run per dataset with `scripts/train_alpha_params.py` (or its launcher,
-`launch_alpha_search.py --variant learned`). Takes ~4 h on
-`ml.g5.2xlarge` on-demand (no spot — gradient state matters).
+`scripts/train_alpha_params.py` is the reference implementation but does
+not currently have a SageMaker launcher wired to it. To include the
+learned-α row in the paper, one of:
 
-```bash
-for d in beauty sports ml32m; do
-    python sagemaker/launch/launch_alpha_search.py \
-        --dataset "$d" \
-        --variant learned \
-        --init-alpha "0.5,0.5,0.5" \
-        --mtl-ckpt "$RQVAE_S3_BASE/decoder-mtl/${d}/decoder-mtl-${d}/output/model.tar.gz"
-done
-```
+- Run `scripts/train_alpha_params.py` locally against the downloaded MTL
+  checkpoint (~4 h on a single GPU machine if you have one).
+- Add a `launch_alpha_params.py` launcher paralleling `launch_alpha_search.py`
+  (small addition; out of scope for this runbook but trivial for the agent
+  to author if the paper plan demands it).
+
+Skip this step if the refined-grid winner satisfies the paper story.
 
 ### 2.5 Aggregate Stage 2 results
 
 ```bash
 PYTHONPATH=. python scripts/collect_results.py \
-    --bucket "$(echo $RQVAE_S3_BASE | sed 's|s3://||' | cut -d/ -f1)" \
-    --prefix rqvae-level-aware \
+    --prefix rqvae-level-aware/alpha-search \
     --aggregate-output results/stage2/all_runs.parquet \
     --per-user-output results/stage2/per_user_runs.parquet
 ```

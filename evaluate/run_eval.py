@@ -28,7 +28,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tarfile
 import time
+from pathlib import Path
 
 import gin
 import torch
@@ -47,6 +49,43 @@ from modules.decoding.vanilla import VanillaBeamSearch
 from modules.heads.sasrec_head import SASRecAuxHead
 from modules.tokenizer.semids import SemanticIdTokenizer
 from train_decoder import _setup_training
+
+
+def _resolve_ckpt(path: str) -> str:
+    """Resolve a checkpoint path that may be a .pt file, a directory
+    containing a .pt, or a directory containing a model.tar.gz (as SageMaker
+    mounts training-input channels). Returns a local path to the .pt file.
+    """
+    p = Path(path)
+    if p.is_file():
+        if p.suffix == ".pt":
+            return str(p)
+        if p.name.endswith(".tar.gz"):
+            extract_dir = Path("/tmp") / f"ckpt_{p.stem.replace('.', '_')}"
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(p) as tf:
+                tf.extractall(extract_dir)
+            p = extract_dir
+        else:
+            return str(p)
+    if p.is_dir():
+        # Extract any tarballs first — SageMaker mounts tar.gz entries verbatim
+        # into training-input channels; they need unpacking before load.
+        existing_pts = list(p.rglob("*.pt"))
+        if not existing_pts:
+            for tarball in p.rglob("*.tar.gz"):
+                with tarfile.open(tarball) as tf:
+                    tf.extractall(p)
+                break
+        pts = sorted(p.rglob("*.pt"))
+        if not pts:
+            raise FileNotFoundError(f"No .pt file under {path}")
+        # Prefer 'best' / 'checkpoint_' entries over arbitrary .pt artefacts.
+        for cand in pts:
+            if "best" in cand.name or cand.name.startswith("checkpoint_"):
+                return str(cand)
+        return str(pts[-1])
+    raise FileNotFoundError(path)
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -237,6 +276,9 @@ def main() -> None:
     }
     dataset_enum = dataset_enum_map.get(args.dataset, RecDataset.AMAZON)
 
+    rqvae_ckpt_local = _resolve_ckpt(args.rqvae_ckpt)
+    decoder_ckpt_local = _resolve_ckpt(args.decoder_ckpt)
+
     setup = _setup_training(
         dataset_folder=args.dataset_folder,
         dataset=dataset_enum,
@@ -251,7 +293,7 @@ def main() -> None:
         vae_n_cat_feats=arch["vae_n_cat_feats"],
         vae_codebook_normalize=arch["vae_codebook_normalize"],
         vae_sim_vq=arch["vae_sim_vq"],
-        pretrained_rqvae_path=args.rqvae_ckpt,
+        pretrained_rqvae_path=rqvae_ckpt_local,
         t5_d_model=arch["t5_d_model"],
         t5_num_heads=arch["t5_num_heads"],
         t5_d_ff=arch["t5_d_ff"],
@@ -273,12 +315,12 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Load decoder checkpoint weights
     # ------------------------------------------------------------------
-    ckpt = torch.load(args.decoder_ckpt, map_location="cpu")
+    ckpt = torch.load(decoder_ckpt_local, map_location="cpu")
     model_state = ckpt.get("model", ckpt)
     model.load_state_dict(model_state, strict=False)
     model = model.to(device)
     model.eval()
-    print(f"Loaded decoder from {args.decoder_ckpt} (iter={ckpt.get('iter', '?')})")
+    print(f"Loaded decoder from {decoder_ckpt_local} (iter={ckpt.get('iter', '?')})")
 
     # ------------------------------------------------------------------
     # Load aux head (if present in checkpoint)
