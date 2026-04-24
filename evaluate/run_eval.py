@@ -51,6 +51,41 @@ from modules.tokenizer.semids import SemanticIdTokenizer
 from train_decoder import _setup_training
 
 
+def _resolve_file(path: str, exts: tuple[str, ...]) -> str:
+    """Return a local path to a file with one of the given extensions.
+
+    Accepts either the file itself, or a directory that contains exactly
+    one matching file (the SageMaker channel-mount shape when a launcher
+    passes a file as a TrainingInput). Also auto-extracts a
+    ``model.tar.gz`` if that's what the mount point contains.
+    """
+    p = Path(path)
+    if p.is_file() and p.name.endswith(exts):
+        return str(p)
+    if p.is_dir():
+        # Handle tar.gz mounts (e.g. alpha-search output tarballs)
+        matches = [m for m in p.rglob("*") if m.is_file() and m.name.endswith(exts)]
+        if not matches:
+            for tarball in p.rglob("*.tar.gz"):
+                with tarfile.open(tarball) as tf:
+                    tf.extractall(p)
+                break
+            matches = [
+                m for m in p.rglob("*") if m.is_file() and m.name.endswith(exts)
+            ]
+        if not matches:
+            raise FileNotFoundError(
+                f"No file with extension {exts} under {path}; "
+                f"contains: {[m.name for m in p.rglob('*') if m.is_file()][:10]}"
+            )
+        # If multiple, prefer ones whose name indicates the canonical artefact.
+        for cand in matches:
+            if "best" in cand.name or cand.name.startswith("checkpoint_"):
+                return str(cand)
+        return str(matches[0])
+    raise FileNotFoundError(path)
+
+
 def _resolve_ckpt(path: str) -> str:
     """Resolve a checkpoint path that may be a .pt file, a directory
     containing a .pt, or a directory containing a model.tar.gz (as SageMaker
@@ -179,18 +214,41 @@ def _build_strategy(
         elif strategy_name == "level_aware_mix_learned" or args.alpha_ckpt is not None:
             if args.alpha_ckpt is None:
                 raise ValueError("level_aware_mix_learned requires --alpha-ckpt.")
-            state = torch.load(args.alpha_ckpt, map_location="cpu")
+            alpha_ckpt_local = _resolve_file(args.alpha_ckpt, exts=(".pt",))
+            state = torch.load(alpha_ckpt_local, map_location="cpu")
+            # alpha_train.py saves {"alpha_params_state_dict": ..., "phi": ..., ...}.
+            # Older formats may nest under "alpha_params" or keep the phi tensor
+            # at the top level; handle all three shapes.
+            if "alpha_params_state_dict" in state:
+                inner = state["alpha_params_state_dict"]
+            elif "alpha_params" in state:
+                inner = state["alpha_params"]
+            else:
+                inner = state
             params = AlphaParams(n_levels=n_levels)
-            params.load_state_dict(state if "phi" in state else state.get("alpha_params", state))
+            params.load_state_dict(inner)
             alpha = params.alpha
         elif strategy_name == "level_aware_mix_grid" or args.alpha_csv is not None:
             if args.alpha_csv is None:
                 raise ValueError("level_aware_mix_grid requires --alpha-csv.")
             import pandas as pd
-            df = pd.read_csv(args.alpha_csv)
-            best = df.sort_values("recall_at_10", ascending=False).iloc[0]
+            alpha_csv_local = _resolve_file(args.alpha_csv, exts=(".csv",))
+            df = pd.read_csv(alpha_csv_local)
+            # alpha_search.py writes columns "recall@K" / "ndcg@K" (matching the
+            # TopKAccumulator schema). Prefer recall@10; fall back to ndcg@10.
+            sort_col = next(
+                (c for c in ("recall@10", "ndcg@10", "recall_at_10")
+                 if c in df.columns),
+                None,
+            )
+            if sort_col is None:
+                raise ValueError(
+                    f"Grid CSV {alpha_csv_local} has neither recall@10 nor "
+                    f"ndcg@10; got {list(df.columns)}"
+                )
+            best = df.sort_values(sort_col, ascending=False).iloc[0]
             alpha = [float(best[f"alpha_{i}"]) for i in range(n_levels)]
-            print(f"Grid alpha (best recall@10={best['recall_at_10']:.4f}): {alpha}")
+            print(f"Grid alpha (best {sort_col}={best[sort_col]:.4f}): {alpha}")
         else:
             # level_aware_mix with no explicit alpha — default to 0.5 per level
             alpha = [0.5] * n_levels

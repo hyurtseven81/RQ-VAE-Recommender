@@ -268,11 +268,19 @@ def main() -> None:
         print(f"[{i + 1}/{len(alpha_grid)}] α={alpha}  " +
               "  ".join(f"{k}={v:.4f}" for k, v in aggregate.items()))
 
-    # Sort by recall@10 if that column exists, else by first metric.
-    sort_key = "recall_at_10" if rows and "recall_at_10" in rows[0] else (
-        next(iter(rows[0])) if rows else "alpha_0"
-    )
-    rows.sort(key=lambda r: r.get(sort_key, 0.0), reverse=True)
+    # TopKAccumulator.reduce() emits keys of the form "recall@{k}" / "ndcg@{k}"
+    # (see evaluate/metrics.py). Use the literal key — earlier code looked for
+    # "recall_at_10" which silently missed the real key and fell back to
+    # an alphabetic no-op sort.
+    sort_key = None
+    for candidate in ("recall@10", "ndcg@10"):
+        if rows and candidate in rows[0]:
+            sort_key = candidate
+            break
+    if sort_key is None:
+        print("[warn] no recall/ndcg key in reduce() output; leaving rows unsorted.")
+    else:
+        rows.sort(key=lambda r: r.get(sort_key, 0.0), reverse=True)
 
     fieldnames = list(rows[0].keys()) if rows else [f"alpha_{i}" for i in range(n_levels)]
     with output_csv.open("w", newline="") as f:
@@ -285,7 +293,8 @@ def main() -> None:
     summary = {
         "dataset": args.dataset,
         "n_alpha_points": len(rows),
-        "best_by_recall_at_10": rows[0] if rows else None,
+        "sort_key": sort_key,
+        "best_by_sort_key": rows[0] if rows else None,
         "csv": str(output_csv),
     }
     summary_path = output_csv.with_suffix(".summary.json")

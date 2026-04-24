@@ -266,9 +266,15 @@ def main() -> None:
         train_data_subsample=False,
     )
 
-    model = setup["model"]
+    wrapped_model = setup["model"]
     tokenizer: SemanticIdTokenizer = setup["tokenizer"]
     train_dataloader: DataLoader = setup["train_dataloader"]
+
+    # _setup_training wraps the model with accelerator.prepare; unwrap so we can
+    # call the private encoder/decoder forward helpers directly in the
+    # teacher-forced loss computation.
+    model = accelerator.unwrap_model(wrapped_model)
+    tokenizer = accelerator.unwrap_model(tokenizer)
 
     ckpt = torch.load(decoder_ckpt_local, map_location="cpu")
     model_state = ckpt.get("model", ckpt)
