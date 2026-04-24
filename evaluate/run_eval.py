@@ -350,12 +350,14 @@ def main() -> None:
     strategy = _build_strategy(args.strategy, args, aux_head, n_levels)
     print(f"Strategy: {args.strategy} → {type(strategy).__name__}")
 
-    if isinstance(strategy, SASRecReranker):
-        raise NotImplementedError(
-            "sasrec_rerank strategy is not currently wired into the eval harness "
-            "(requires decoder hidden-state access). Use level_aware_mix* variants "
-            "for SASRec-augmented decoding."
-        )
+    # SASRecReranker is post-hoc: it runs AFTER a base beam search, not
+    # inside the per-level expand loop. Detect it and switch to the
+    # two-phase path (vanilla generation → rerank with query_hidden).
+    is_post_hoc_rerank = isinstance(strategy, SASRecReranker)
+    if is_post_hoc_rerank:
+        base_strategy = VanillaBeamSearch()
+    else:
+        base_strategy = strategy
 
     # ------------------------------------------------------------------
     # Evaluation loop
@@ -370,12 +372,23 @@ def main() -> None:
                     tokenized,
                     top_k=True,
                     temperature=1,
-                    strategy=strategy,
+                    strategy=base_strategy,
                     codebook_embs=codebook_embs,
+                    return_query_hidden=is_post_hoc_rerank,
                 )
+                if is_post_hoc_rerank:
+                    reranked_beams, _ = strategy.rerank(
+                        beams=generated.sem_ids,
+                        log_probas=generated.log_probas,
+                        codebook_embs=codebook_embs,
+                        decoder_hidden=generated.query_hidden,
+                    )
+                    generated_sem_ids = reranked_beams
+                else:
+                    generated_sem_ids = generated.sem_ids
             target = tokenized.sem_ids_fut[:, :n_levels]
             acc.accumulate(
-                generated_ids=generated.sem_ids,
+                generated_ids=generated_sem_ids,
                 target_ids=target,
             )
 

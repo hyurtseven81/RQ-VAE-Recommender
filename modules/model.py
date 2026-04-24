@@ -23,6 +23,11 @@ class ModelOutput(NamedTuple):
 class GenerationOutput(NamedTuple):
     sem_ids: Tensor
     log_probas: Tensor
+    # Optional: encoder-side query hidden state [B, d_model] produced at level 0,
+    # before any beam expansion. Consumed by post-hoc reranking strategies
+    # (e.g. SASRecReranker) to generate a single-query-per-user dense score.
+    # None unless generate(..., return_query_hidden=True) was requested.
+    query_hidden: Tensor | None = None
 
 
 def _strip_dedup_col(
@@ -307,6 +312,7 @@ class EncoderDecoderRetrievalModel(nn.Module):
         user_id=None,
         strategy: BeamSearchStrategy | None = None,
         codebook_embs: list[Tensor] | None = None,
+        return_query_hidden: bool = False,
     ):
         """Generate top-k semantic IDs using sampling-based beam search.
 
@@ -324,10 +330,15 @@ class EncoderDecoderRetrievalModel(nn.Module):
                              that use embedding-space diversity (e.g. DiverseBeamSearch
                              with use_embedding_distance=True). When None, strategies
                              that need it will raise NotImplementedError.
+            return_query_hidden: If True, also returns the decoder hidden state from
+                             level 0 (before any beam expansion) as a [B, d_model]
+                             tensor. Consumed by post-hoc reranking strategies like
+                             :class:`SASRecReranker` to produce one query per user.
 
         Returns:
-            generated_ids: [B, top_k, num_hierarchies]
-            log_probas:    [B, top_k]
+            (generated_ids, log_probas) or, when return_query_hidden=True,
+            (generated_ids, log_probas, query_hidden) where
+            query_hidden is [B, d_model] captured at level 0.
         """
         if strategy is None:
             from modules.decoding.vanilla import VanillaBeamSearch
@@ -348,6 +359,7 @@ class EncoderDecoderRetrievalModel(nn.Module):
         generated = None  # [B, k, h] grows with each hierarchy step
         log_probas = torch.zeros(B, k, device=input_ids.device)
         past_kv = EncoderDecoderCache(DynamicCache(), DynamicCache())
+        query_hidden: Tensor | None = None
 
         for h in range(self.num_hierarchies):
             if generated is not None:
@@ -367,6 +379,13 @@ class EncoderDecoderRetrievalModel(nn.Module):
 
             probas = F.softmax(self.decoder_mlp[h](dec_out[:, -1, :]), dim=-1)
 
+            # Capture the level-0 decoder hidden as the "user query" for
+            # post-hoc reranking. At level 0 the decoder has no beam-expanded
+            # input yet, so dec_out has shape [B, seq, d_model] and the last
+            # token's hidden state is a natural per-user query.
+            if h == 0 and return_query_hidden:
+                query_hidden = dec_out[:, -1, :].detach().clone()
+
             generated, log_probas, parent_global_idx = strategy.expand(
                 beams=generated,
                 log_probas=log_probas,
@@ -384,6 +403,8 @@ class EncoderDecoderRetrievalModel(nn.Module):
             else:
                 past_kv.reorder_cache(parent_global_idx)
 
+        if return_query_hidden:
+            return generated, log_probas, query_hidden
         return generated, log_probas
 
     @torch.no_grad()
@@ -394,12 +415,27 @@ class EncoderDecoderRetrievalModel(nn.Module):
         temperature: int = 1,
         strategy: BeamSearchStrategy | None = None,
         codebook_embs: list[Tensor] | None = None,
+        return_query_hidden: bool = False,
     ) -> GenerationOutput:
         sem_ids_dim = self.num_hierarchies + 1
         input_ids = _strip_dedup_col(batch.sem_ids, sem_ids_dim, self.num_hierarchies)
         attention_mask = _strip_dedup_col(
             batch.seq_mask.long(), sem_ids_dim, self.num_hierarchies
         )
+        if return_query_hidden:
+            generated_ids, log_probas, query_hidden = self.generate(
+                attention_mask=attention_mask,
+                input_ids=input_ids,
+                user_id=batch.user_ids,
+                strategy=strategy,
+                codebook_embs=codebook_embs,
+                return_query_hidden=True,
+            )
+            return GenerationOutput(
+                sem_ids=generated_ids,
+                log_probas=log_probas,
+                query_hidden=query_hidden,
+            )
         generated_ids, log_probas = self.generate(
             attention_mask=attention_mask,
             input_ids=input_ids,

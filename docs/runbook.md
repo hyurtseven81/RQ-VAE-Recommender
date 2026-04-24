@@ -262,25 +262,64 @@ Run once per dataset with grids centred on that dataset's pilot winner.
 3 jobs, each iterating 125 alpha points (5³). Expect ~6–10 h per job on
 `ml.g5.xlarge` spot.
 
-### 2.4 Learned alpha — deferred (requires a launcher)
+### 2.4 Learned alpha
 
-`scripts/train_alpha_params.py` is the reference implementation but does
-not currently have a SageMaker launcher wired to it. To include the
-learned-α row in the paper, one of:
+One SageMaker job per dataset. Auto-discovers MTL decoder + RQ-VAE ckpts,
+freezes both, trains `AlphaParams.phi` for N epochs via the teacher-forced
+mixed-CE objective in `evaluate/alpha_train.py`. The resulting `.pt` is
+consumed by step 2.6 with the `level_aware_mix_learned` strategy.
 
-- Run `scripts/train_alpha_params.py` locally against the downloaded MTL
-  checkpoint (~4 h on a single GPU machine if you have one).
-- Add a `launch_alpha_params.py` launcher paralleling `launch_alpha_search.py`
-  (small addition; out of scope for this runbook but trivial for the agent
-  to author if the paper plan demands it).
+```bash
+set -a; source .env; set +a
+python sagemaker/launch/launch_alpha_params.py \
+    --datasets beauty sports ml32m \
+    --init-alpha "0.5,0.5,0.5" \
+    --n-epochs 1 \
+    --job-suffix learned
+```
 
-Skip this step if the refined-grid winner satisfies the paper story.
+Three on-demand `ml.g5.2xlarge` jobs (spot is disabled by default — the
+optimiser state is ~3 scalars but preemption still wastes a few minutes).
+Expect ~1–4 h per dataset depending on training-set size. Monitor with
+§M1 (name prefix `alpha-learned-`).
 
-### 2.5 Aggregate Stage 2 results
+Each job writes `{dataset}_learned.pt` (the learned `AlphaParams`
+state dict) plus `{dataset}_learned.summary.json` (final alpha + per-epoch
+history) to
+`$RQVAE_S3_BASE/alpha-learned/{dataset}-learned/<job>/output/model.tar.gz`.
+
+### 2.5 Evaluate the alpha winners
+
+Three eval sub-runs per dataset, one per alpha source:
+
+```bash
+# (a) level_aware_mix with the refined-grid winner — pass α directly.
+python sagemaker/launch/launch_decoding_eval.py \
+    --datasets beauty \
+    --strategies level_aware_mix \
+    --alpha "<refined-winner-triple>"    # e.g. "0.5,0.4,0.1"
+
+# (b) level_aware_mix_grid — passes the CSV from §2.3 so run_eval picks
+# best by recall@10.
+python sagemaker/launch/launch_decoding_eval.py \
+    --datasets beauty \
+    --strategies level_aware_mix_grid \
+    --alpha-csv "$RQVAE_S3_BASE/alpha-search/beauty-refined/<job>/output/<csv>"
+
+# (c) level_aware_mix_learned — pass the .pt from §2.4.
+python sagemaker/launch/launch_decoding_eval.py \
+    --datasets beauty \
+    --strategies level_aware_mix_learned \
+    --alpha-ckpt "$RQVAE_S3_BASE/alpha-learned/beauty-learned/<job>/output/model.tar.gz"
+```
+
+Repeat per dataset. Aggregate in step 2.6.
+
+### 2.6 Aggregate Stage 2 results
 
 ```bash
 PYTHONPATH=. python scripts/collect_results.py \
-    --prefix rqvae-level-aware/alpha-search \
+    --prefix rqvae-level-aware/eval-results/mtl \
     --aggregate-output results/stage2/all_runs.parquet \
     --per-user-output results/stage2/per_user_runs.parquet
 ```

@@ -68,6 +68,24 @@ TARGETS = {
         "configs/rqvae_steam.gin",
         "rqvae/steam-repro3/rqvae-steam-repro3-20260422-120832/output/model.tar.gz",
     ),
+    # --- Upstream pre-trained checkpoints (paper-plan Stage 0 gate) ---
+    # These live at $RQVAE_S3_BASE/checkpoints/rqvae_<dataset>_upstream/ after
+    # the `aws s3 cp` step in docs/runbook.md §0.2.
+    "beauty_upstream": (
+        "validate-rqvae-beauty-upstream",
+        "configs/rqvae_amazon_beauty.gin",
+        "checkpoints/rqvae_beauty_upstream/checkpoint_high_entropy.pt",
+    ),
+    "sports_upstream": (
+        "validate-rqvae-sports-upstream",
+        "configs/rqvae_amazon_sports.gin",
+        "checkpoints/rqvae_sports_upstream/checkpoint_high_entropy.pt",
+    ),
+    "ml32m_upstream": (
+        "validate-rqvae-ml32m-upstream",
+        "configs/rqvae_ml32m.gin",
+        "checkpoints/rqvae_ml32m_upstream/checkpoint_high_entropy.pt",
+    ),
 }
 
 

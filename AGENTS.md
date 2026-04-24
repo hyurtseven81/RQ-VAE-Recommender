@@ -129,9 +129,9 @@ Stage 1 vanilla decoder × 3     — train_decoder.py per dataset
   + α-free eval sweep           — evaluate/run_eval.py × 5 strategies × 3 datasets
   ↓
 Stage 2 MTL decoder × 3         — train_decoder_mtl.py per dataset
-  + α pilot grid 3³             — scripts/alpha_grid_search.py (pilot stage)
-  + α refined grid 5³           — scripts/alpha_grid_search.py (refine stage)
-  + learned α                   — scripts/train_alpha_params.py
+  + α pilot grid 3³             — evaluate/alpha_search.py (pilot stage)
+  + α refined grid 5³           — evaluate/alpha_search.py (refine stage)
+  + learned α                   — evaluate/alpha_train.py
   ↓
 scripts/collect_results.py      — aggregate parquets
 scripts/make_tables.py          — paper tables
@@ -198,6 +198,25 @@ Strategies registered in `modules/decoding/__init__.py`:
 
 - **Stage 1 (α-free)**: `vanilla`, `dbs`, `gumbel_topk`, `hybrid`, `sasrec_rerank`
 - **Stage 2 (level-aware α)**: `level_aware_mix`, `level_aware_mix_grid`, `level_aware_mix_learned`
+
+Post-hoc vs in-loop: `sasrec_rerank` is post-hoc (reranks completed beams
+using a single per-user query); the three `level_aware_mix*` variants mix
+dense + autoregressive scores in-loop at every decoding level. The
+`run_eval.py` harness handles both — for `sasrec_rerank` it runs a
+`VanillaBeamSearch` pass with `return_query_hidden=True` and invokes
+`SASRecReranker.rerank` after generation.
+
+## Entry points for Stage 1 / Stage 2
+
+| Role | Script | Launcher |
+|---|---|---|
+| Decoder training (α-free) | `train_decoder.py` | `sagemaker/launch/launch_decoder.py` |
+| Decoder training (MTL, SASRec aux head) | `train_decoder_mtl.py` | `sagemaker/launch/launch_mtl.py` |
+| Single strategy eval | `evaluate/run_eval.py` | `sagemaker/launch/launch_decoding_eval.py` |
+| Per-level α grid sweep (pilot + refined) | `evaluate/alpha_search.py` | `sagemaker/launch/launch_alpha_search.py` |
+| Learned-α training | `evaluate/alpha_train.py` | `sagemaker/launch/launch_alpha_params.py` |
+| RQ-VAE ckpt validation | `evaluate/validate_rqvae.py` | `sagemaker/launch/launch_validate_rqvae.py` |
+| Local pre-flight gate | `scripts/stage0_pipeline_check.py` | — |
 
 ## Keeping this file up to date
 
