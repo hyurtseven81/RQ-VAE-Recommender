@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-DATASETS = ["beauty", "sports", "toys", "steam"]
+DATASETS = ["beauty", "sports", "ml32m", "toys", "steam"]
 METRICS = ["recall@5", "recall@10", "recall@20", "ndcg@5", "ndcg@10", "ndcg@20"]
 
 CONFIG_ORDER = [

@@ -17,7 +17,7 @@ import pyarrow.parquet as pq
 import seaborn as sns
 
 sns.set_theme(style="whitegrid", font_scale=1.1)
-DATASETS = ["beauty", "sports", "toys", "steam"]
+DATASETS = ["beauty", "sports", "ml32m", "toys", "steam"]
 PALETTE = {
     "B0 (Vanilla TIGER)": "#4878cf",
     "B1 (LIGER)": "#d65f5f",
