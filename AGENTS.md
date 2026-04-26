@@ -51,11 +51,11 @@ from upstream `trained_models/` checkpoints.
 modules/decoding/      — beam search strategies (vanilla, dbs, gumbel, hybrid, level_aware_mix, sasrec_reranker)
 modules/heads/         — sasrec_head.py, mtl_losses.py
 modules/analysis/      — residual_entropy.py
-evaluate/              — metrics.py, stats.py, result_store.py, run_eval.py, validate_rqvae.py
-scripts/               — alpha_grid_search.py, train_alpha_params.py, make_figures.py, make_tables.py
+evaluate/              — metrics.py, stats.py, result_store.py, run_eval.py, alpha_search.py, alpha_train.py, validate_rqvae.py
+scripts/               — collect_results.py, make_figures.py, make_tables.py, stage0_pipeline_check.py
 sagemaker/             — launch scripts for SageMaker training + eval jobs
 paper/                 — LaTeX source (CIKM 2026 submission)
-docs/                  — paper_plan.md, bisect_runbook.md (parked), implementation_plan.md
+docs/                  — paper_plan.md, runbook.md (index), runbook_local.md, runbook_sagemaker.md, bisect_runbook.md (parked), implementation_plan.md
 ```
 
 ## AWS / S3

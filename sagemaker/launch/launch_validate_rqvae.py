@@ -70,7 +70,7 @@ TARGETS = {
     ),
     # --- Upstream pre-trained checkpoints (paper-plan Stage 0 gate) ---
     # These live at $RQVAE_S3_BASE/checkpoints/rqvae_<dataset>_upstream/ after
-    # the `aws s3 cp` step in docs/runbook.md §0.2.
+    # the `aws s3 cp` step in docs/runbook_sagemaker.md §1.1.
     "beauty_upstream": (
         "validate-rqvae-beauty-upstream",
         "configs/rqvae_amazon_beauty.gin",
