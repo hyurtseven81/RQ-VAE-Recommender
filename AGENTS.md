@@ -55,7 +55,7 @@ evaluate/              — metrics.py, stats.py, result_store.py, run_eval.py, a
 scripts/               — collect_results.py, make_figures.py, make_tables.py, stage0_pipeline_check.py
 sagemaker/             — launch scripts for SageMaker training + eval jobs
 paper/                 — LaTeX source (CIKM 2026 submission)
-docs/                  — paper_plan.md, runbook.md (index), runbook_local.md, runbook_sagemaker.md, bisect_runbook.md (parked), implementation_plan.md
+docs/                  — paper_plan.md, runbook.md (index), runbook_operator.md, runbook_sagemaker.md, bisect_runbook.md (parked), implementation_plan.md
 ```
 
 ## AWS / S3

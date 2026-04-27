@@ -150,7 +150,7 @@ def validate(config_path: str, rqvae_checkpoint: str, output_dir: str,
     # 32M ratings + runs Sentence-T5 over ~86k items on CPU. Inside SageMaker
     # the SM_CHANNEL_DATASET symlink (set up above) populates this directory
     # before we get here; locally the operator must sync the preprocessed
-    # cache from S3 first (see docs/runbook_local.md §2).
+    # cache from S3 first (see docs/runbook_operator.md §2).
     processed_dir = Path(dataset_folder) / "processed"
     processed_pts = (
         sorted(processed_dir.glob("*.pt")) if processed_dir.exists() else []

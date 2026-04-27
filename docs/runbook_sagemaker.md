@@ -7,7 +7,7 @@ re-clone.
 
 This runbook does not run anything compute-heavy locally. Local-only
 steps (Stage 0 gate, aggregation, paper artefacts) live in
-`docs/runbook_local.md`. **Run the local runbook's §0 (pre-flight) and
+`docs/runbook_operator.md`. **Run the operator runbook's §0 (pre-flight) and
 §1 (Stage 0 gate) before this one** — they decide whether ML32M is in
 scope and whether it is safe to spend SageMaker quota.
 
@@ -81,7 +81,7 @@ load time.
 ls trained_models/rqvae_amazon_beauty trained_models/rqvae_amazon_sports trained_models/rqvae_ml32m
 ```
 
-If any directory is missing, run §0.4 of `docs/runbook_local.md` to
+If any directory is missing, run §0.4 of `docs/runbook_operator.md` to
 sync from upstream and come back.
 
 ### 0.4 Stage 0 verdict
@@ -413,7 +413,7 @@ The launcher auto-upgrades `--decoder-variant` to `mtl` because
 `sasrec_rerank` requires the SASRec aux head. Wait via §M2.
 
 Status: `§3: PASS` once §3.5, §3.6, and §3.7 jobs are all
-`Completed`. Hand off to the local runbook §3 for aggregation.
+`Completed`. Hand off to the operator runbook §3 for aggregation.
 
 ## §M Monitors
 
@@ -552,10 +552,10 @@ Append a dated paragraph to `docs/progress_log.md`:
     echo "  §3 stage-2:     <N MTL + M alpha-search + K eval jobs Completed | … >"
     echo "Job log: /tmp/sagemaker_jobs.log"
     echo "Open issues: <one-liner | none>"
-    echo "Next: <run docs/runbook_local.md §3 (aggregation) | wait on …>"
+    echo "Next: <run docs/runbook_operator.md §3 (aggregation) | wait on …>"
 } >> docs/progress_log.md
 ```
 
 Then post a two-line summary to the operator: which sections passed,
 which (if any) jobs failed, and the next concrete step (typically
-"run `docs/runbook_local.md` §3").
+"run `docs/runbook_operator.md` §3").

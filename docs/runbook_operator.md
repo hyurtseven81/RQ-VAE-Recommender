@@ -1,17 +1,22 @@
-# Local runbook — laptop-side steps for the CIKM 2026 pipeline
+# Operator runbook — pre-flight + post-run for the CIKM 2026 pipeline
 
 You are an automation agent. Follow this runbook end-to-end on the
-operator's laptop. The repo is already cloned and pulled to the current
-working directory; do not re-clone.
+operator's machine. The repo is already cloned and pulled to the
+current working directory; do not re-clone.
 
-This runbook covers everything that happens **off** SageMaker:
+This runbook covers everything the operator does **around** the
+SageMaker pipeline:
 
-- Stage 0 — the inventory + ML32M pipeline gate.
+- Pre-flight — venv, AWS auth, env vars, upstream `trained_models/`
+  sync, presence-only Stage 0 gate.
 - Post-SageMaker — pulling result tarballs from S3, building the
-  paper's `all_runs.parquet`, and rendering tables/figures.
+  paper's `all_runs.parquet`, rendering tables and figures.
 
-Every long-running cloud step is in `docs/runbook_sagemaker.md`. Don't
-launch SageMaker jobs from this runbook.
+The actual training and evaluation jobs run on SageMaker via the
+companion `docs/runbook_sagemaker.md`. The deep checkpoint-load /
+codebook-fingerprint validation also runs on SageMaker (via the
+validator job in §1 there) — this runbook does **not** import the
+heavy ML stack and does **not** launch any SageMaker jobs.
 
 ## Conventions for the agent
 
@@ -411,7 +416,7 @@ Append a dated paragraph to `docs/progress_log.md`:
 ```bash
 {
     echo
-    echo "## $(date -u +%FT%TZ) — local runbook session"
+    echo "## $(date -u +%FT%TZ) — operator runbook session"
     echo
     echo "Stage 0 verdict: <READY for {datasets} | BLOCKED on ml32m | …>"
     echo "Datasets in scope: <beauty / sports / ml32m | beauty / sports>"
