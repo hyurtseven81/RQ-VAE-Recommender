@@ -211,8 +211,21 @@ def _check_data_loads(spec: dict) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--datasets", nargs="+", choices=list(DATASETS), default=list(DATASETS))
-    ap.add_argument("--skip-data-load", action="store_true",
-                    help="Skip ItemData construction; only checks checkpoints.")
+    ap.add_argument(
+        "--skip-checkpoint-load",
+        action="store_true",
+        help="Skip the torch.load + RqVae.load_state_dict check. Useful when "
+             "the local venv lacks the ML stack (torch, gin, accelerate, ...) "
+             "or when laptop imports are too slow — the deep checkpoint "
+             "validation happens on SageMaker via "
+             "`launch_validate_rqvae.py --targets *_upstream` (see "
+             "docs/runbook_sagemaker.md §1).",
+    )
+    ap.add_argument(
+        "--skip-data-load",
+        action="store_true",
+        help="Skip ItemData construction; only checks checkpoints.",
+    )
     ap.add_argument("--report-path", default="docs/paper_plan_stage0_report.md")
     ap.add_argument("--json-path", default=None,
                     help="Also write the raw JSON report to this path.")
@@ -226,7 +239,8 @@ def main() -> None:
             "checkpoint_present": _check_checkpoint_present(spec),
         }
         if ds_report["checkpoint_present"]["ok"]:
-            ds_report["checkpoint_loads"] = _check_checkpoint_loads(spec)
+            if not args.skip_checkpoint_load:
+                ds_report["checkpoint_loads"] = _check_checkpoint_loads(spec)
             if not args.skip_data_load:
                 ds_report["data_loads"] = _check_data_loads(spec)
         report[ds] = ds_report

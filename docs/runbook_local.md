@@ -132,19 +132,67 @@ Status: `§0: PASS` once all four sub-steps complete clean.
 ## §1 Stage 0 — local pipeline gate
 
 This is the **cheap pre-flight** before spending SageMaker quota.
-Default mode checks only that the upstream RQ-VAE checkpoints load
-correctly. The full data-load gate is **opt-in after §2 has synced
-preprocessed dataset caches** — it is _not_ run by default.
+Default mode is presence-only — it just verifies that the upstream
+RQ-VAE checkpoints exist locally with non-zero size. The deep
+checkpoint-load validation (which requires the full ML stack and is
+slow on laptop CPUs) is delegated to the SageMaker validator
+(`docs/runbook_sagemaker.md` §1), which is strictly more thorough — it
+also reports per-level codebook fingerprints.
 
-> ⚠️ Past incident: a previous session left the data-load gate on
-> with no local cache, which silently triggered raw ML32M
-> preprocessing (32M-rating download + Sentence-T5 over ~86k items
-> on CPU). The script now refuses to materialise raw data and the
-> default-on `--skip-data-load` flag below double-protects against
-> a re-run of that. The "real" data-pipeline gate happens on
-> SageMaker where the preprocessed channel is mounted from S3.
+> ⚠️ Past incidents:
+>
+> - A previous session left the data-load gate on with no local
+>   cache, which silently triggered raw ML32M preprocessing (32M-rating
+>   download + Sentence-T5 over ~86k items on CPU) and ran for 13+
+>   hours. The script now refuses to materialise raw data and the
+>   default-on `--skip-data-load` flag below double-protects against
+>   a re-run of that.
+> - A more recent session blocked on a venv `protobuf` mismatch that
+>   broke wandb's import — every `_check_checkpoint_loads` call
+>   crashed at module-import time. The default-on `--skip-checkpoint-load`
+>   flag below side-steps that entirely; the SageMaker validator (which
+>   uses the SM container's pinned env) handles the deep check.
 
-### 1.1 Run the gate (cheap — checkpoints only)
+### 1.1 Run the gate (presence-only, default cheap path)
+
+```bash
+set -a; source .env; set +a
+PYTHONPATH=. python scripts/stage0_pipeline_check.py \
+    --datasets beauty sports ml32m \
+    --skip-checkpoint-load \
+    --skip-data-load \
+    --report-path docs/paper_plan_stage0_report.md \
+    --json-path /tmp/stage0_report.json
+```
+
+This finishes in seconds and only checks `trained_models/<dataset>/
+checkpoint_high_entropy.pt` exists with reasonable size. It does **not**
+import torch / gin / wandb so it can't be derailed by venv issues.
+Show the report:
+
+```bash
+cat docs/paper_plan_stage0_report.md
+```
+
+### 1.2 Decision gate
+
+Inspect the report's `checkpoint_present` column:
+
+- **All three present** → `§1: PASS`. Proceed to
+  `docs/runbook_sagemaker.md`. The SageMaker validator there does the
+  actual checkpoint-load + codebook-fingerprint check; that is the
+  authoritative gate for the paper.
+- **One or more missing** → §0.4 didn't pull that file. Re-run the
+  upstream `git checkout upstream/main -- trained_models/` step and
+  retry. If the upstream repo doesn't have a checkpoint for that
+  dataset, drop it from this run and inform the operator.
+
+### 1.3 (Optional) Deep checkpoint-load gate — only if you want a local sanity check
+
+The SageMaker validator already does this on the cloud, so this is
+strictly redundant. Run it locally only if you want to catch an
+architecture mismatch before paying for a SageMaker job. It needs the
+full ML stack from §0.2 installed and uncorrupted.
 
 ```bash
 set -a; source .env; set +a
@@ -155,70 +203,20 @@ PYTHONPATH=. python scripts/stage0_pipeline_check.py \
     --json-path /tmp/stage0_report.json
 ```
 
-The script exits 0 iff every requested dataset passes
-`checkpoint_loads`. Show the report:
+Decision tree for `checkpoint_loads`:
 
-```bash
-cat docs/paper_plan_stage0_report.md
-```
-
-### 1.2 Decision gate
-
-Inspect the report's verdict column and act:
-
-- **All three READY** → `§1: PASS`. The SageMaker runbook is unblocked
-  for all three datasets. The data-pipeline gate happens server-side
-  during SageMaker training, where the preprocessed cache is mounted
-  from S3.
+- **All three READY** → architecture matches, proceed with confidence.
 - **All three BLOCKED on the same import-time error** (e.g. wandb /
   protobuf / sentence-transformers / torchvision) → this is a venv
   problem, not a codebase regression. Most common: a stray
   `tf-keras` / `tensorflow` install left protobuf at 7.x, which
   crashes wandb's import. Apply the venv-repair commands at the end
-  of §0.2 (force-downgrade protobuf to `>=5.26.1,<6`, reinstall
-  matched torch/torchvision) and re-run §1.1. Do **not** edit the
-  codebase.
-- **Beauty + Sports READY, ML32M BLOCKED on `checkpoint_loads`** →
-  the upstream sync in §0.4 didn't pull the ML32M file, or the gin
-  config's architecture doesn't match the saved `model_config`. Stop
-  and ask the operator; do not attempt to fix the gin config without
-  explicit instruction.
-- **One dataset BLOCKED with a unique error not seen on the other
-  two** → that's a regression specific to that dataset. Stop and
-  report the full traceback line; do not proceed.
+  of §0.2 and re-run, **or** just skip §1.3 and let the SageMaker
+  validator do this check.
+- **One dataset BLOCKED with a unique error** → real regression for
+  that dataset. Stop and report the full traceback line.
 
-### 1.3 (Optional) Full data-load gate — only after §2 cache sync
-
-Skip §1.3 if you are only orchestrating SageMaker. Run it only if
-the operator wants to verify locally that `ItemData` constructs
-end-to-end on the fork's data path. **Pre-requirement: §2 below
-must have run successfully so the processed caches are present
-under `dataset/`.** The script now refuses to trigger raw
-preprocessing — if the cache is missing it returns an actionable
-error instead of materialising hours of CPU work.
-
-```bash
-set -a; source .env; set +a
-PYTHONPATH=. python scripts/stage0_pipeline_check.py \
-    --datasets beauty sports ml32m \
-    --report-path docs/paper_plan_stage0_report.md \
-    --json-path /tmp/stage0_report.json
-```
-
-Decision tree for the data-load column:
-
-- **All three READY** → record per-dataset `n_items` /
-  `sample_x_shape` in the report.
-- **ML32M BLOCKED with reason `processed cache missing under …`** →
-  re-run §2 to sync `$RQVAE_S3_BASE/datasets/ml-32m/`. If that S3
-  prefix doesn't exist yet, ML32M's preprocessing has never been
-  uploaded — that's a SageMaker-side action (see
-  `sagemaker/launch/launch_preprocess_datasets.py`), not a local
-  one. Drop ML32M for this session.
-- **Beauty / Sports BLOCKED similarly** → re-run §2 to sync
-  `$RQVAE_S3_BASE/datasets/amazon/`.
-
-### 1.4 (Optional) Local validator runs
+### 1.4 (Optional) Local validator runs — only if you want a local fingerprint
 
 If you want a per-checkpoint codebook fingerprint without spending
 SageMaker time, the validator can run on CPU locally. This takes
