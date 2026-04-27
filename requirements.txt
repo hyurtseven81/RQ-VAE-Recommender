@@ -4,6 +4,12 @@ einops>=0.8.0
 numpy>=1.24.3
 pandas>=1.5.3
 polars==1.9.0
+# Pinned: wandb 0.19's generated protobuf bindings are incompatible
+# with protobuf>=6 (which gets pulled in transitively by tf-keras and
+# friends). Keep 5.x range to avoid the import-time crash that any
+# entry point importing wandb (i.e. anything that imports train_rqvae
+# or train_decoder) is vulnerable to.
+protobuf>=5.26.1,<6
 sentence_transformers>=3.3.1
 tlparse>=0.3.30
 torch>=2.5.1

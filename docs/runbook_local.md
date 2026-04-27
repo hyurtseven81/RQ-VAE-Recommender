@@ -55,8 +55,16 @@ pip install --quiet 'sagemaker>=2.230,<3' 'boto3>=1.34'
 # Stage 0 + local validator + collect_results need the ML stack:
 pip install --quiet 'torch>=2.5.1' 'torchvision>=0.20.1' \
     --index-url https://download.pytorch.org/whl/cpu
+# Note: protobuf is pinned to <6 because wandb 0.19's generated
+# bindings are incompatible with protobuf 6+. Without this pin a
+# stray transitive install (tf-keras etc.) can leave the venv with
+# protobuf 7, which crashes any entry point that imports wandb —
+# including train_rqvae, which Stage 0 imports to register gin
+# configurables. See AGENTS.md "Known issues" + requirements.txt.
 pip install --quiet \
     gin-config==0.5.0 einops 'polars==1.9.0' \
+    'protobuf>=5.26.1,<6' \
+    'wandb>=0.19.0,<0.25' \
     sentence-transformers accelerate pandas pyarrow \
     huggingface_hub tqdm
 ```
@@ -69,6 +77,16 @@ force-reinstall both at matched versions:
 pip install --upgrade --force-reinstall \
     'torch==2.5.1' 'torchvision==0.20.1' \
     --index-url https://download.pytorch.org/whl/cpu
+```
+
+If a previous session installed `tf-keras`, `tensorflow`, or anything
+that pulls in protobuf 6+ (symptom on any Stage 0 / validator run:
+`TypeError: Couldn't build proto file into descriptor pool: …` or
+`AttributeError: …protobuf.internal.builder…`), force-downgrade
+protobuf:
+
+```bash
+pip install --quiet --force-reinstall 'protobuf>=5.26.1,<6'
 ```
 
 ### 0.3 AWS auth
@@ -152,14 +170,22 @@ Inspect the report's verdict column and act:
   for all three datasets. The data-pipeline gate happens server-side
   during SageMaker training, where the preprocessed cache is mounted
   from S3.
+- **All three BLOCKED on the same import-time error** (e.g. wandb /
+  protobuf / sentence-transformers / torchvision) → this is a venv
+  problem, not a codebase regression. Most common: a stray
+  `tf-keras` / `tensorflow` install left protobuf at 7.x, which
+  crashes wandb's import. Apply the venv-repair commands at the end
+  of §0.2 (force-downgrade protobuf to `>=5.26.1,<6`, reinstall
+  matched torch/torchvision) and re-run §1.1. Do **not** edit the
+  codebase.
 - **Beauty + Sports READY, ML32M BLOCKED on `checkpoint_loads`** →
   the upstream sync in §0.4 didn't pull the ML32M file, or the gin
   config's architecture doesn't match the saved `model_config`. Stop
   and ask the operator; do not attempt to fix the gin config without
   explicit instruction.
-- **Beauty or Sports BLOCKED on `checkpoint_loads`** → that's a
-  regression, not a config issue. Stop and report the full traceback
-  line; do not proceed.
+- **One dataset BLOCKED with a unique error not seen on the other
+  two** → that's a regression specific to that dataset. Stop and
+  report the full traceback line; do not proceed.
 
 ### 1.3 (Optional) Full data-load gate — only after §2 cache sync
 
