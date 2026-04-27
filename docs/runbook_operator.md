@@ -303,6 +303,30 @@ all eval jobs have status `Completed`. This step downloads result
 tarballs from S3, unpacks them, and writes
 `results/stage{1,2}/all_runs.parquet`.
 
+### 3.0 Pre-check — eval results exist
+
+Before running the collectors, confirm SageMaker eval tarballs are
+actually present at the expected prefixes. **If both prefixes are
+empty, the SageMaker pipeline has not run yet and §3 is not failed —
+it just isn't ready.** In that case post `§3: WAIT — eval results not
+yet on S3`, skip §3.1–§3.4 and §4, jump straight to §5 with a "Next:
+run docs/runbook_sagemaker.md" line, and exit cleanly.
+
+```bash
+set -a; source .env; set +a
+n_baseline=$(aws s3 ls "$RQVAE_S3_BASE/eval-results/baseline/" \
+    --profile "$RQVAE_AWS_PROFILE" --recursive 2>/dev/null \
+    | grep -c output.tar.gz)
+n_mtl=$(aws s3 ls "$RQVAE_S3_BASE/eval-results/mtl/" \
+    --profile "$RQVAE_AWS_PROFILE" --recursive 2>/dev/null \
+    | grep -c output.tar.gz)
+echo "baseline tarballs: $n_baseline  |  mtl tarballs: $n_mtl"
+```
+
+- `n_baseline = 0 AND n_mtl = 0` → `§3: WAIT`. SageMaker pipeline not
+  run yet. Move on to §5 and stop.
+- `n_baseline > 0 OR n_mtl > 0` → proceed to §3.1.
+
 ### 3.1 Stage 1 aggregate
 
 ```bash
@@ -363,9 +387,16 @@ find results/stage2/alpha_learned/ -name '*_learned.summary.json' -exec cat {} \
 
 Status: `§3: PASS` once both `results/stage{1,2}/all_runs.parquet`
 exist and the group-by output covers every expected
-`(dataset, decoder_type, strategy)` combination.
+`(dataset, decoder_type, strategy)` combination. `§3: WAIT` is a
+valid terminal state when the SageMaker pipeline has not finished
+yet (per §3.0); in that case skip §4 entirely.
 
 ## §4 Paper artefacts
+
+> Skip §4 if §3 ended in WAIT. The table generators run on empty
+> parquets without crashing but produce all-`--` placeholder tables
+> and no figures, which would be actively misleading. Re-run §3
+> + §4 once the SageMaker pipeline has produced eval tarballs.
 
 ```bash
 mkdir -p paper/tables paper/figures
@@ -411,24 +442,40 @@ heatmap or strategy bar chart).
 
 ## §5 Final report
 
-Append a dated paragraph to `docs/progress_log.md`:
+Append a dated paragraph to `docs/progress_log.md`. **Do not** include
+S3 bucket names, account ids, profile names, or anything that comes
+from `.env` — `progress_log.md` is gitignored but the operator may
+copy excerpts elsewhere. Refer to S3 paths as `$RQVAE_S3_BASE/...`
+literal (note the heredoc below is single-quoted so the shell does
+not expand it).
 
 ```bash
-{
-    echo
-    echo "## $(date -u +%FT%TZ) — operator runbook session"
-    echo
-    echo "Stage 0 verdict: <READY for {datasets} | BLOCKED on ml32m | …>"
-    echo "Datasets in scope: <beauty / sports / ml32m | beauty / sports>"
-    echo "Aggregated: results/stage1/all_runs.parquet (<N1> rows),"
-    echo "            results/stage2/all_runs.parquet (<N2> rows),"
-    echo "            results/all_runs.parquet (<N1+N2> rows)"
-    echo "Paper artefacts: paper/tables/* and paper/figures/* generated."
-    echo "Open issues: <one-liner | none>"
-    echo "Next: <SageMaker runbook step / paper edit / nothing>"
-} >> docs/progress_log.md
+cat <<'EOF' >> docs/progress_log.md
+
+## __SESSION_TIMESTAMP__ — operator runbook session
+
+Stage 0 verdict: <READY for {datasets} | BLOCKED on ml32m | …>
+Datasets in scope: <beauty / sports / ml32m | beauty / sports>
+Aggregated: results/stage1/all_runs.parquet (<N1> rows),
+            results/stage2/all_runs.parquet (<N2> rows),
+            results/all_runs.parquet (<N1+N2> rows)
+Paper artefacts: paper/tables/* and paper/figures/* generated.
+Open issues: <one-liner | none>
+Next: <SageMaker runbook step / paper edit / nothing>
+EOF
+
+# Stamp the date header without invoking shell expansion on the body.
+sed -i.bak "s|__SESSION_TIMESTAMP__|$(date -u +%FT%TZ)|" docs/progress_log.md \
+    && rm -f docs/progress_log.md.bak
 ```
 
-Replace `<…>` with the actual values from the run. Then post a
-two-line summary to the operator: which sections passed, which (if
-any) failed, and the next concrete step.
+Replace `<…>` with the actual values from the run. Reference S3
+locations only as their `$RQVAE_S3_BASE/...` form so the file does
+not embed account-specific identifiers. Then post a two-line summary
+to the operator: which sections passed, which (if any) failed, and
+the next concrete step.
+
+> Reminder: `docs/progress_log.md` is gitignored on purpose (see
+> `.gitignore`). Never `git add` it; if you do, scrub it first
+> through the same lens used for source — no bucket / profile /
+> account-id leakage.

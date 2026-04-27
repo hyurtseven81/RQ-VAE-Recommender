@@ -539,23 +539,37 @@ aws s3 ls "$RQVAE_S3_BASE/alpha-learned/" --recursive \
 
 ## §F Final report
 
-Append a dated paragraph to `docs/progress_log.md`:
+Append a dated paragraph to `docs/progress_log.md`. **Do not** include
+S3 bucket names, account ids, profile names, role ARNs, or anything
+that comes from `.env`. The file is gitignored but the operator may
+copy excerpts elsewhere. The single-quoted heredoc below prevents the
+shell from expanding any env vars.
 
 ```bash
-{
-    echo
-    echo "## $(date -u +%FT%TZ) — sagemaker runbook session"
-    echo
-    echo "Stages launched:"
-    echo "  §1 validators:  <N jobs Completed | M Failed | … >"
-    echo "  §2 stage-1:     <N decoder + M eval jobs Completed | … >"
-    echo "  §3 stage-2:     <N MTL + M alpha-search + K eval jobs Completed | … >"
-    echo "Job log: /tmp/sagemaker_jobs.log"
-    echo "Open issues: <one-liner | none>"
-    echo "Next: <run docs/runbook_operator.md §3 (aggregation) | wait on …>"
-} >> docs/progress_log.md
+cat <<'EOF' >> docs/progress_log.md
+
+## __SESSION_TIMESTAMP__ — sagemaker runbook session
+
+Stages launched:
+  §1 validators:  <N jobs Completed | M Failed | … >
+  §2 stage-1:     <N decoder + M eval jobs Completed | … >
+  §3 stage-2:     <N MTL + M alpha-search + K eval jobs Completed | … >
+Job log: /tmp/sagemaker_jobs.log
+Open issues: <one-liner | none>
+Next: <run docs/runbook_operator.md §3 (aggregation) | wait on …>
+EOF
+
+sed -i.bak "s|__SESSION_TIMESTAMP__|$(date -u +%FT%TZ)|" docs/progress_log.md \
+    && rm -f docs/progress_log.md.bak
 ```
 
-Then post a two-line summary to the operator: which sections passed,
-which (if any) jobs failed, and the next concrete step (typically
-"run `docs/runbook_operator.md` §3").
+Reference S3 locations only as their `$RQVAE_S3_BASE/...` literal form
+(the heredoc is single-quoted, so the dollar signs survive into the
+file). Then post a two-line summary to the operator: which sections
+passed, which (if any) jobs failed, and the next concrete step
+(typically "run `docs/runbook_operator.md` §3").
+
+> Reminder: `docs/progress_log.md` is gitignored on purpose (see
+> `.gitignore`). Never `git add` it; if you do, scrub it first
+> through the same lens used for source — no bucket / profile /
+> account-id leakage.
