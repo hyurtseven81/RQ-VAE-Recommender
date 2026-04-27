@@ -26,10 +26,19 @@ The experimental scope is `docs/paper_plan.md`; this runbook is the
 - Never edit the gin configs or launchers without an explicit
   instruction from the operator. If a command fails, stop and report
   the failing command + the last 30 lines of stdout/stderr.
+- §M1 polls with **exponential backoff** (60s → 30 min cap) and
+  samples CloudWatch logs every ~10 min after the first 30 min.
+  Don't replace it with a bare `sleep N` — the alerts and hang
+  detection live in the loop. §M-intervene maps every alert /
+  failure pattern to a concrete recommended action (auto-retry vs
+  escalate). Apply auto-retry only when the table explicitly tags
+  the symptom as "Agent OK to retry"; everything else escalates.
 - Cap polling loops at the documented timeouts. If a job exceeds them,
   stop polling and ask the operator how to proceed.
 - Capture every launched job name into `/tmp/sagemaker_jobs.log` so
-  the final report can list them.
+  the final report can list them. Capture every failure context
+  (status + last 200 log lines) into `/tmp/sagemaker_failures.log`
+  via the snippet in §M-intervene before escalating.
 - Append a dated paragraph to `docs/progress_log.md` (create if
   needed) at the end of the session summarising what ran, what is
   still in flight, and what failed.
@@ -419,7 +428,24 @@ Status: `§3: PASS` once §3.5, §3.6, and §3.7 jobs are all
 
 These are stand-alone polling loops. Each safely re-runs at any time.
 
-### §M1 — long training jobs
+### §M1 — long training jobs (with exponential backoff + log sampling)
+
+This is the canonical poller for any job that takes more than ~30
+minutes — Stage-0 validators, Stage-1 / Stage-2 decoder + MTL
+training, learned-α training, alpha-search jobs.
+
+What the loop does each cycle:
+
+1. `describe-training-job` for every job in the list, prints
+   `status` / `secondary status` / `billable seconds` / `current
+   poll interval`.
+2. Once any job has been alive for ≥ 30 min, sample its CloudWatch
+   log tail (last 10 minutes) and grep for known failure
+   signatures listed in §M-intervene. Print an `[ALERT]` line per
+   match.
+3. Sleep — exponential backoff: 60s → 120s → 300s → 600s → 1800s
+   (capped). Catches fast init failures fast; doesn't waste API
+   calls on a 20-hour training run.
 
 ```bash
 set -a; source .env; set +a
@@ -430,25 +456,79 @@ jobs=(
     decoder-mtl-beauty decoder-mtl-sports decoder-mtl-ml32m
 )
 
+# Exponential backoff state.
+sleep_seconds=60          # initial poll interval (catch init failures)
+max_sleep=1800            # 30 min cap
+log_sample_after=1800     # don't tail logs in first 30 min (no signal yet)
+log_sample_every=600      # then sample every 10 min
+elapsed=0
+last_log_sampled=0
+
+# Per-job state — last seen status + when it last advanced. Used to
+# flag potential hangs (no progress for an hour while still InProgress).
+declare -A last_status last_change
+
 while true; do
     done_count=0
     for job in "${jobs[@]}"; do
-        status=$(aws sagemaker describe-training-job \
+        meta=$(aws sagemaker describe-training-job \
             --training-job-name "$job" \
             --profile "$RQVAE_AWS_PROFILE" --region "$RQVAE_AWS_REGION" \
-            --query TrainingJobStatus --output text 2>/dev/null || echo NotFound)
-        billable=$(aws sagemaker describe-training-job \
-            --training-job-name "$job" \
-            --profile "$RQVAE_AWS_PROFILE" --region "$RQVAE_AWS_REGION" \
-            --query BillableTimeInSeconds --output text 2>/dev/null || echo 0)
-        printf "  %-32s  %-12s  billable=%ss\n" "$job" "$status" "$billable"
+            --query 'join(`|`, [TrainingJobStatus, SecondaryStatus, to_string(BillableTimeInSeconds)])' \
+            --output text 2>/dev/null || echo "NotFound|NotFound|0")
+        IFS='|' read -r status secondary billable <<< "$meta"
+
+        # Track status transitions.
+        if [ "${last_status[$job]:-}" != "$status:$secondary" ]; then
+            last_status[$job]="$status:$secondary"
+            last_change[$job]=$elapsed
+        fi
+        stuck_for=$(( elapsed - ${last_change[$job]:-$elapsed} ))
+
+        printf "  %-36s  %-12s  %-22s  billable=%6ss  stuck=%ds\n" \
+            "$job" "$status" "$secondary" "$billable" "$stuck_for"
+
+        # Periodic log sampling once the job is past startup.
+        if [ "$elapsed" -ge "$log_sample_after" ] \
+        && [ $((elapsed - last_log_sampled)) -ge "$log_sample_every" ] \
+        && [ "$status" = "InProgress" ]; then
+            tail=$(aws logs tail /aws/sagemaker/TrainingJobs \
+                --log-stream-name-prefix "${job}/" \
+                --profile "$RQVAE_AWS_PROFILE" --region "$RQVAE_AWS_REGION" \
+                --since 10m --format short 2>/dev/null | tail -200)
+            # Patterns documented in §M-intervene below.
+            if echo "$tail" | grep -qiE 'OutOfMemoryError|CUDA out of memory'; then
+                echo "  [ALERT] $job  kind=OOM  -> stop, halve batch_size, relaunch (§M-intervene)"
+            fi
+            if echo "$tail" | grep -qE '\b(loss|rl|vl)=[+-]?(nan|inf)\b'; then
+                echo "  [ALERT] $job  kind=DIVERGENCE  -> stop, lower lr or commitment_weight (§M-intervene)"
+            fi
+            if echo "$tail" | grep -qiE 'Traceback|raise [A-Z][a-zA-Z]*Error'; then
+                echo "  [ALERT] $job  kind=PYTHON_ERROR  -> review last 100 log lines, classify"
+            fi
+            if echo "$tail" | grep -qiE 'spot.*interrup|managed-spot.*resum'; then
+                echo "  [INFO]  $job  kind=SPOT  -> resuming via managed checkpointing"
+            fi
+            last_log_sampled=$elapsed
+        fi
+
+        # Hang detection — InProgress with no status change for > 1 h.
+        if [ "$status" = "InProgress" ] && [ "$stuck_for" -gt 3600 ]; then
+            echo "  [ALERT] $job  kind=HANG_SUSPECT  -> sample logs manually; if dead, stop and relaunch"
+        fi
+
         case "$status" in
             Completed|Failed|Stopped|NotFound) done_count=$((done_count + 1)) ;;
         esac
     done
-    echo "---"
+    echo "---  poll $((elapsed/60))m  next-in ${sleep_seconds}s"
+
     [ "$done_count" -eq "${#jobs[@]}" ] && break
-    sleep 300
+    sleep "$sleep_seconds"
+    elapsed=$(( elapsed + sleep_seconds ))
+    # Double the interval until we hit the cap.
+    sleep_seconds=$(( sleep_seconds * 2 ))
+    [ "$sleep_seconds" -gt "$max_sleep" ] && sleep_seconds=$max_sleep
 done
 ```
 
@@ -460,6 +540,58 @@ aws logs tail /aws/sagemaker/TrainingJobs \
     --profile "$RQVAE_AWS_PROFILE" --region "$RQVAE_AWS_REGION" \
     --since 6h | tail -100
 ```
+
+Match the error against §M-intervene below for the recommended action.
+
+### §M-intervene — failure pattern → action mapping
+
+Use this when §M1 prints an `[ALERT]` line, or when a job moves to
+`Failed`. Map the symptom to a recommended action. **Default to
+escalating to the operator** (paste the alert + last 50 log lines
+into the chat and stop) for any pattern not listed here. Auto-recovery
+is appropriate only for the explicitly-tagged "agent OK to retry"
+cases below.
+
+| Symptom (CloudWatch / status) | Likely cause | Recommended action | Agent OK to retry? |
+|---|---|---|---|
+| `OutOfMemoryError` / `CUDA out of memory` | Batch size too large for instance, or activation memory regression | Stop the job, halve `batch_size` in the dataset's gin config, relaunch the same launcher. If second OOM, escalate. | Yes, **once** with halved batch size |
+| `loss=nan` / `loss=inf` / `vl=nan` | Training divergence — too-high lr, codebook collapse, fp16 overflow | Stop. For RQ-VAE: try `commitment_weight=0.1` and/or `learning_rate=5e-4`. For decoder: lower lr 2× and disable AMP. Escalate if it diverges twice. | No — divergence is signal, surface it |
+| Status `Stopped` with `SecondaryStatus=MaxWaitTimeExceeded` (spot) | Spot capacity gap exceeded `max_wait` | Re-launch the same job; managed-spot will resume from the latest checkpoint if `checkpoint_s3_uri` was set. | Yes |
+| Status `Stopped` with secondary `Interrupted` and resume in logs | Transient spot interruption mid-run | No action — managed spot will resume automatically. Keep polling. | n/a (auto-resumes) |
+| `Traceback` followed by ImportError / ModuleNotFoundError | requirements.txt drift (e.g. protobuf/wandb mismatch) | Stop. Check requirements.txt vs the version actually installed in the container; rebuild the source upload (no code change should be needed since SageMaker pip-installs from requirements.txt). Escalate after one retry. | Yes, **once** |
+| `Traceback` referencing `gin.config.UnknownConfigurableError` | Gin config has a binding for a parameter that no longer exists | Real codebase regression. **Escalate to operator.** Do not edit configs without explicit instruction. | No |
+| `Traceback` referencing `RuntimeError: shape '[…]' is invalid for input` or state-dict shape mismatch | Architecture mismatch between gin config and saved checkpoint | **Escalate.** Likely upstream ckpt was trained with different `vae_embed_dim` / `vae_n_cat_feats` than the gin config asserts. Do not auto-fix. | No |
+| `[ALERT] kind=HANG_SUSPECT` (no status transition for > 1 h while `InProgress`) | Container hung (CUDA driver, deadlock, infinite loop) | Tail the logs manually for the past 30 min. If they show no new lines either: stop the job, relaunch. If they show progress: increase the hang threshold and keep polling. | Yes, after manual log inspection |
+| Job exists but `aws describe-training-job` returns `NotFound` | Region / profile mismatch, or typo in job name | Re-check `RQVAE_AWS_REGION` / `RQVAE_AWS_PROFILE` against the launcher's settings; fix and re-poll. | n/a |
+| Job sits `Starting` for > 20 min | Quota exhaustion or container-image pull failure | `describe-training-job --query FailureReason` will populate when SageMaker gives up. If quota: escalate. If image pull: stop, relaunch (transient). | Yes for image-pull |
+
+How to stop a job (for any of the "stop, relaunch" cases above):
+
+```bash
+aws sagemaker stop-training-job --training-job-name "$JOB" \
+    --profile "$RQVAE_AWS_PROFILE" --region "$RQVAE_AWS_REGION"
+```
+
+How to capture the failure context before relaunching:
+
+```bash
+{
+    echo "=== $JOB failed at $(date -u +%FT%TZ) ==="
+    aws sagemaker describe-training-job --training-job-name "$JOB" \
+        --profile "$RQVAE_AWS_PROFILE" --region "$RQVAE_AWS_REGION" \
+        --query '[TrainingJobStatus, SecondaryStatus, FailureReason]' --output text
+    echo "---"
+    aws logs tail /aws/sagemaker/TrainingJobs \
+        --log-stream-name-prefix "${JOB}/" \
+        --profile "$RQVAE_AWS_PROFILE" --region "$RQVAE_AWS_REGION" \
+        --since 6h | tail -200
+} >> /tmp/sagemaker_failures.log
+```
+
+Attach the relevant `/tmp/sagemaker_failures.log` excerpt to the
+operator chat when escalating, and include it in the §F final
+report (without env-var expansion — quote it as
+`$RQVAE_S3_BASE/...` literal where applicable).
 
 ### §M2 — many short jobs (alpha sweeps, eval strategy sweep)
 
@@ -492,6 +624,28 @@ while true; do
         --name-contains "$NAME_FILTER" \
         --query 'length(TrainingJobSummaries)' --output text)
     echo "$(date +%T)  in_progress=$in_progress  completed=$completed  failed=$failed"
+
+    # On the first sign of failures, drill down: list the failed jobs and
+    # post their last 50 log lines to /tmp/sagemaker_failures.log for the
+    # operator. Do not auto-retry short eval jobs — there are too many
+    # cheap-to-relaunch alternatives, and the sweep is fungible.
+    if [ "$failed" -gt 0 ]; then
+        for fj in $(aws sagemaker list-training-jobs \
+            --profile "$RQVAE_AWS_PROFILE" --region "$RQVAE_AWS_REGION" \
+            --max-results 500 --status-equals Failed \
+            --name-contains "$NAME_FILTER" \
+            --query 'TrainingJobSummaries[].TrainingJobName' --output text); do
+            echo "  [FAIL] $fj — see §M-intervene"
+            {
+                echo "=== $fj  failed at $(date -u +%FT%TZ) ==="
+                aws logs tail /aws/sagemaker/TrainingJobs \
+                    --log-stream-name-prefix "${fj}/" \
+                    --profile "$RQVAE_AWS_PROFILE" --region "$RQVAE_AWS_REGION" \
+                    --since 6h | tail -50
+            } >> /tmp/sagemaker_failures.log
+        done
+    fi
+
     [ "$in_progress" = "0" ] && break
     sleep 120
 done
