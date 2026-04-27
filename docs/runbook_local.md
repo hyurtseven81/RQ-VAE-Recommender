@@ -113,23 +113,32 @@ Status: `§0: PASS` once all four sub-steps complete clean.
 
 ## §1 Stage 0 — local pipeline gate
 
-This is the cheap pre-flight before spending SageMaker quota. It
-checks (a) checkpoints load, (b) `ItemData` constructs for each
-dataset, and writes `docs/paper_plan_stage0_report.md`.
+This is the **cheap pre-flight** before spending SageMaker quota.
+Default mode checks only that the upstream RQ-VAE checkpoints load
+correctly. The full data-load gate is **opt-in after §2 has synced
+preprocessed dataset caches** — it is _not_ run by default.
 
-### 1.1 Run the gate
+> ⚠️ Past incident: a previous session left the data-load gate on
+> with no local cache, which silently triggered raw ML32M
+> preprocessing (32M-rating download + Sentence-T5 over ~86k items
+> on CPU). The script now refuses to materialise raw data and the
+> default-on `--skip-data-load` flag below double-protects against
+> a re-run of that. The "real" data-pipeline gate happens on
+> SageMaker where the preprocessed channel is mounted from S3.
+
+### 1.1 Run the gate (cheap — checkpoints only)
 
 ```bash
 set -a; source .env; set +a
 PYTHONPATH=. python scripts/stage0_pipeline_check.py \
     --datasets beauty sports ml32m \
+    --skip-data-load \
     --report-path docs/paper_plan_stage0_report.md \
     --json-path /tmp/stage0_report.json
 ```
 
-The script exits 0 iff every requested dataset passes both
-`checkpoint_loads` and (unless `--skip-data-load` was passed)
-`data_loads`. Show the report:
+The script exits 0 iff every requested dataset passes
+`checkpoint_loads`. Show the report:
 
 ```bash
 cat docs/paper_plan_stage0_report.md
@@ -140,24 +149,60 @@ cat docs/paper_plan_stage0_report.md
 Inspect the report's verdict column and act:
 
 - **All three READY** → `§1: PASS`. The SageMaker runbook is unblocked
-  for all three datasets.
-- **Beauty + Sports READY, ML32M BLOCKED on `data_loads`** → record
-  the failure mode in `docs/progress_log.md`. Status: `§1: PARTIAL —
-  ML32M dropped pending data-pipeline fix`. The SageMaker runbook
-  proceeds with `--datasets beauty sports` only.
-- **ML32M BLOCKED on `checkpoint_loads`** → either the upstream sync
-  in §0.4 didn't pull the file, or the gin config's architecture
-  doesn't match the saved `model_config`. Stop and ask the operator;
-  do not attempt to fix the gin config without explicit instruction.
-- **Beauty or Sports BLOCKED** → that's a regression, not a config
-  issue. Stop and report the full traceback line; do not proceed.
+  for all three datasets. The data-pipeline gate happens server-side
+  during SageMaker training, where the preprocessed cache is mounted
+  from S3.
+- **Beauty + Sports READY, ML32M BLOCKED on `checkpoint_loads`** →
+  the upstream sync in §0.4 didn't pull the ML32M file, or the gin
+  config's architecture doesn't match the saved `model_config`. Stop
+  and ask the operator; do not attempt to fix the gin config without
+  explicit instruction.
+- **Beauty or Sports BLOCKED on `checkpoint_loads`** → that's a
+  regression, not a config issue. Stop and report the full traceback
+  line; do not proceed.
 
-### 1.3 (Optional) Local validator runs
+### 1.3 (Optional) Full data-load gate — only after §2 cache sync
+
+Skip §1.3 if you are only orchestrating SageMaker. Run it only if
+the operator wants to verify locally that `ItemData` constructs
+end-to-end on the fork's data path. **Pre-requirement: §2 below
+must have run successfully so the processed caches are present
+under `dataset/`.** The script now refuses to trigger raw
+preprocessing — if the cache is missing it returns an actionable
+error instead of materialising hours of CPU work.
+
+```bash
+set -a; source .env; set +a
+PYTHONPATH=. python scripts/stage0_pipeline_check.py \
+    --datasets beauty sports ml32m \
+    --report-path docs/paper_plan_stage0_report.md \
+    --json-path /tmp/stage0_report.json
+```
+
+Decision tree for the data-load column:
+
+- **All three READY** → record per-dataset `n_items` /
+  `sample_x_shape` in the report.
+- **ML32M BLOCKED with reason `processed cache missing under …`** →
+  re-run §2 to sync `$RQVAE_S3_BASE/datasets/ml-32m/`. If that S3
+  prefix doesn't exist yet, ML32M's preprocessing has never been
+  uploaded — that's a SageMaker-side action (see
+  `sagemaker/launch/launch_preprocess_datasets.py`), not a local
+  one. Drop ML32M for this session.
+- **Beauty / Sports BLOCKED similarly** → re-run §2 to sync
+  `$RQVAE_S3_BASE/datasets/amazon/`.
+
+### 1.4 (Optional) Local validator runs
 
 If you want a per-checkpoint codebook fingerprint without spending
 SageMaker time, the validator can run on CPU locally. This takes
 ~5–15 min per dataset depending on item count. Skip if SageMaker
 validator jobs are already queued (`docs/runbook_sagemaker.md` §1).
+
+> Pre-requirement: §2 must have synced the relevant `dataset/<split>/`
+> cache. The validator will hard-fail with an actionable error if the
+> processed cache is missing — it no longer silently triggers raw
+> preprocessing.
 
 ```bash
 mkdir -p /tmp/validate-local
@@ -183,23 +228,44 @@ bit L0).
 
 Status: `§1: PASS` if Stage 0 gate is satisfied for at least Beauty + Sports.
 
-## §2 Sync preprocessed dataset caches (only if Stage 1.3 in the SageMaker runbook will run locally)
+## §2 Sync preprocessed dataset caches (optional)
 
 The SageMaker training and eval jobs mount preprocessed dataset caches
 from S3, so this step is **not required** to launch SageMaker runs.
-Skip §2 entirely if you are only orchestrating SageMaker.
+Run §2 only if the operator wants to do one of these locally:
+
+- The optional full data-load gate (§1.3 above).
+- The optional local validator runs (§1.4 below).
+
+Sync only the splits you need. The Amazon zip is small (~hundreds of
+MB); ML32M can be tens of GB.
 
 ```bash
+set -a; source .env; set +a
 mkdir -p dataset
+
+# Amazon (Beauty + Sports + Toys share the same cache):
 aws s3 sync "$RQVAE_S3_BASE/datasets/amazon/" dataset/amazon/ \
     --profile "$RQVAE_AWS_PROFILE" --exact-timestamps --no-progress
-aws s3 sync "$RQVAE_S3_BASE/datasets/ml-32m/" dataset/ml-32m/ \
-    --profile "$RQVAE_AWS_PROFILE" --exact-timestamps --no-progress
-ls dataset/amazon/ dataset/ml-32m/ 2>/dev/null
+
+# ML32M — only if the operator wants the local data-load gate to cover it:
+# aws s3 sync "$RQVAE_S3_BASE/datasets/ml-32m/" dataset/ml-32m/ \
+#     --profile "$RQVAE_AWS_PROFILE" --exact-timestamps --no-progress
+
+ls dataset/amazon/processed/ dataset/ml-32m/processed/ 2>/dev/null
 ```
 
-If `dataset/ml-32m/` does not exist on S3 yet, this is expected — see
-the SageMaker runbook for the preprocessing job, or skip ML32M for now.
+If a target prefix does not exist on S3 yet, the cache has never been
+generated — that's a SageMaker-side preprocessing job
+(`sagemaker/launch/launch_preprocess_datasets.py`), not a local one.
+Drop the affected dataset from the local-side gates and let the
+SageMaker runbook handle it.
+
+> Do **not** run `ItemData(...)` directly against an empty
+> `dataset/<split>/` directory locally — it will silently invoke
+> `raw_data.process()` which downloads the source dataset and runs
+> Sentence-T5 over every item on CPU. The Stage 0 script (§1.3) now
+> guards against this; nothing else here does.
 
 ## §3 Post-SageMaker — pull results from S3
 

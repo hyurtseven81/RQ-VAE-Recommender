@@ -145,6 +145,25 @@ def validate(config_path: str, rqvae_checkpoint: str, output_dir: str,
     codebook_size = rqvae.codebook_size
     print(f"Model: n_layers={n_layers}, codebook_size={codebook_size}")
 
+    # Refuse to silently materialise raw data — ItemData would otherwise call
+    # raw_data.process() when the cache is missing, which for ML32M downloads
+    # 32M ratings + runs Sentence-T5 over ~86k items on CPU. Inside SageMaker
+    # the SM_CHANNEL_DATASET symlink (set up above) populates this directory
+    # before we get here; locally the operator must sync the preprocessed
+    # cache from S3 first (see docs/runbook_local.md §2).
+    processed_dir = Path(dataset_folder) / "processed"
+    processed_pts = (
+        sorted(processed_dir.glob("*.pt")) if processed_dir.exists() else []
+    )
+    if not processed_pts:
+        raise RuntimeError(
+            f"processed cache missing under {processed_dir}/ — refusing to "
+            f"trigger raw preprocessing. Sync with: "
+            f"aws s3 sync $RQVAE_S3_BASE/datasets/{Path(dataset_folder).name}/ "
+            f"{dataset_folder}/  (or run inside SageMaker where the "
+            f"SM_CHANNEL_DATASET channel mounts the cache automatically)."
+        )
+
     items = ItemData(
         root=dataset_folder,
         dataset=dataset,

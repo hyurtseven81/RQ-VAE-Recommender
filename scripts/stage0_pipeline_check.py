@@ -131,7 +131,42 @@ def _check_checkpoint_loads(spec: dict) -> dict:
 
 
 def _check_data_loads(spec: dict) -> dict:
-    """Construct ItemData; for ML32M this surfaces any lingering pipeline issues."""
+    """Construct ItemData; for ML32M this surfaces any lingering pipeline issues.
+
+    **Fail-fast on missing processed cache.** ``ItemData`` will silently
+    invoke ``raw_data.process()`` if the processed cache is absent, and for
+    ML32M that pulls a 32M-rating dataset and runs Sentence-T5 on ~86k
+    items — a multi-hour CPU job. Stage 0 is meant to be a cheap
+    pre-flight; the real data-pipeline gate runs on SageMaker where the
+    preprocessed channel is mounted from S3. So this check refuses to
+    materialise raw data and returns an actionable error instead.
+    """
+    folder = Path(spec["dataset_folder"])
+    if not folder.exists():
+        return {
+            "ok": False,
+            "reason": (
+                f"dataset folder missing: {folder}. Sync from S3 with: "
+                f"aws s3 sync $RQVAE_S3_BASE/datasets/{folder.name}/ {folder}/ "
+                f"or pass --skip-data-load to defer the data-load gate to SageMaker."
+            ),
+        }
+
+    processed_dir = folder / "processed"
+    processed_pts = sorted(processed_dir.glob("*.pt")) if processed_dir.exists() else []
+    if not processed_pts:
+        return {
+            "ok": False,
+            "reason": (
+                f"processed cache missing under {processed_dir}/ — refusing to "
+                f"trigger raw preprocessing (would take hours on CPU for ML32M). "
+                f"Sync with: aws s3 sync $RQVAE_S3_BASE/datasets/{folder.name}/ "
+                f"{folder}/  OR re-run with --skip-data-load to defer the "
+                f"data-load gate to SageMaker."
+            ),
+            "processed_dir": str(processed_dir),
+        }
+
     try:
         from data.processed import ItemData, RecDataset
     except Exception as e:
@@ -140,16 +175,6 @@ def _check_data_loads(spec: dict) -> dict:
     rec_dataset = getattr(RecDataset, spec["rec_dataset"], None)
     if rec_dataset is None:
         return {"ok": False, "reason": f"unknown RecDataset enum: {spec['rec_dataset']}"}
-
-    folder = Path(spec["dataset_folder"])
-    if not folder.exists():
-        return {
-            "ok": False,
-            "reason": (
-                f"dataset folder missing: {folder}. Sync with: "
-                f"aws s3 sync $RQVAE_S3_BASE/datasets/{folder.name}/ {folder}/"
-            ),
-        }
 
     try:
         kwargs = dict(
@@ -175,7 +200,12 @@ def _check_data_loads(spec: dict) -> dict:
     except Exception as e:
         return {"ok": False, "reason": f"ItemData index failed: {e}"}
 
-    return {"ok": True, "n_items": n_items, "sample_x_shape": x_shape}
+    return {
+        "ok": True,
+        "n_items": n_items,
+        "sample_x_shape": x_shape,
+        "processed_pt": str(processed_pts[0]),
+    }
 
 
 def main() -> None:
