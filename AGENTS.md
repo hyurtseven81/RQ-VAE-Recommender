@@ -72,8 +72,19 @@ export RQVAE_AWS_PROFILE=<boto3-profile-name>    # optional; falls back to AWS_P
 export RQVAE_AWS_REGION=us-east-1                # optional; falls back to AWS_REGION, then us-east-1
 ```
 
-- **Instance quotas**: `g5.xlarge` on-demand=1 (shared), `g5.4xlarge` on-demand=30 (use this for RQ-VAE / validator), `g5.xlarge` spot=5 (fine for eval sweeps and α pilot).
+- **Instance quotas (current account, observed 2026-04-27)**:
+  - `g5.xlarge` on-demand = 1 (shared, eval-only)
+  - `g5.xlarge` spot = 5 (fine for eval sweeps and α pilot)
+  - `g5.2xlarge` on-demand = limited
+  - `g5.2xlarge` spot = **1** (only one decoder/MTL job at a time on spot — fall back to on-demand g5.4xlarge for parallelism)
+  - `g5.4xlarge` on-demand = 30 (use this for RQ-VAE / validator and as the spot fallback)
 - **Auth refresh**: whatever your org requires (e.g. `mwinit`, `aws sso login --profile $RQVAE_AWS_PROFILE`) — credentials expire roughly every 10h.
+
+When parallelism matters (Stage 1 + Stage 2 training in flight at the
+same time), pass `--no-spot --instance-type ml.g5.4xlarge` to
+`launch_decoder.py` / `launch_mtl.py` for everything beyond the first
+spot job. Cost overhead is ~3× per-hour vs g5.2xlarge spot but you
+gain real parallelism.
 
 ## Datasets and upstream checkpoints
 
@@ -83,9 +94,25 @@ retrain the RQ-VAE layer for the paper; we train only the decoder on top.
 
 | Dataset | Users | Items | Upstream RQ-VAE checkpoint | Codebook fingerprint (end-of-training validator output) |
 |---|---:|---:|---|---|
-| Amazon Beauty | ~22K | ~12K | `trained_models/rqvae_amazon_beauty/checkpoint_*.pt` | Healthy — 248–256/256 per level, entropy 7.66–7.73 bits (our 2026-04-21 validation) |
-| Amazon Sports | ~35K | ~18K | `trained_models/rqvae_amazon_sports/checkpoint_high_entropy.pt` | Partial collapse — L0: 33/256 (1.78 bits), L1: 96/256 (3.81 bits), L2: 134/256 (4.82 bits). Accepted as the "imperfect-codebook" reference. |
-| MovieLens-32M | ~200K | ~86K | `trained_models/rqvae_ml32m/checkpoint_high_entropy.pt` | **Unvalidated** — Stage 0 of the paper plan gates inclusion pending (a) validator fingerprint and (b) fork data pipeline compatibility check. |
+| Amazon Beauty | ~22K | ~12K | `trained_models/rqvae_amazon_beauty/checkpoint_*.pt` | **Partial collapse** — L0: 48/256 (3.65 bits), L1: 111/256 (4.61 bits), L2: 138/256 (5.11 bits) (cloud validator, 2026-04-27, target `beauty_upstream`). `healthy=true` per the validator's > 2-bit L0 threshold but the inverted-pyramid pattern (low L0, higher L1/L2) is the same shape as Sports — both upstream Amazon checkpoints are imperfect codebooks. |
+| Amazon Sports | ~35K | ~18K | `trained_models/rqvae_amazon_sports/checkpoint_high_entropy.pt` | **Partial collapse** — L0: 33/256 (1.78 bits), L1: 96/256 (3.81 bits), L2: 134/256 (4.82 bits). `healthy=false` (L0 < 2 bits). Accepted as the "imperfect-codebook" reference. |
+| MovieLens-32M | ~200K | ~86K | `trained_models/rqvae_ml32m/checkpoint_high_entropy.pt` | **Unvalidated**. ML32M phase blocked on a separate gap: the preprocessed dataset cache does not exist on S3 yet. See `docs/runbook_sagemaker.md` §1.0 for the preprocessing job that must run before validator + decoder. |
+
+> **Provenance note on the Beauty fingerprint above.** Earlier
+> versions of this table cited `248–256/256, 7.66–7.73 bits` for
+> Beauty. That number was for the **fork's own** healthy-Beauty
+> checkpoint at
+> `$RQVAE_S3_BASE/checkpoints/rqvae_amazon_beauty/checkpoint_399999.pt`,
+> validated 2026-04-21. The paper plan switched to **upstream**
+> `trained_models/rqvae_amazon_beauty/checkpoint_*.pt`, which has the
+> weaker fingerprint above. Both files exist; the paper uses the
+> upstream one for consistency with Sports + ML32M. If the paper's
+> "decoding-on-imperfect-codebooks" framing weakens because **all
+> three** datasets now look partial-collapse rather than
+> "Beauty (healthy) + Sports (marginal) + ML32M (?)", revisit the
+> trade-off in `docs/paper_plan.md` — using the fork's healthy Beauty
+> ckpt would re-introduce the contrast at the cost of mixed
+> fork+upstream provenance.
 
 Upstream HEAD's `trained_models/` is **not** tracked in this fork
 (`trained_models/` is in `.gitignore` since commit `6355423`). To fetch

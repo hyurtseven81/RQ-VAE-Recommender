@@ -86,15 +86,16 @@ def sync(job_name: str) -> None:
         for member in tf:
             if not member.isfile():
                 continue
-            # Tarball entries look like "amazon/processed/data_beauty.pt" or
-            # "steam/processed/data_steam.pt". Route each to the corresponding
-            # datasets/<dataset>/ prefix.
+            # Tarball entries look like "amazon/processed/data_beauty.pt",
+            # "steam/processed/data_steam.pt", or
+            # "ml-32m/processed/data_ml-32m.pt". Route each to the
+            # corresponding datasets/<dataset>/ prefix.
             rel = member.name.removeprefix("./")
             parts = rel.split("/", 1)
             if len(parts) < 2:
                 continue
             ds, sub = parts
-            if ds not in ("amazon", "steam"):
+            if ds not in ("amazon", "steam", "ml-32m"):
                 continue
             s3_key = f"{S3_DATASETS_PREFIX_ROOT}/{ds}/{sub}"
             data = tf.extractfile(member)

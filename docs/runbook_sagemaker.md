@@ -116,6 +116,74 @@ clear.
 Goal: produce a `verdict.json` per upstream checkpoint so the paper's
 "setup" section can cite per-level codebook fingerprints.
 
+### 1.0 Preprocessed dataset caches must exist on S3
+
+The training and eval jobs all mount the preprocessed dataset cache as
+the SageMaker `dataset` channel. If
+`$RQVAE_S3_BASE/datasets/<dataset>/` is empty or missing for a dataset
+in scope, the corresponding training jobs will hang on raw-data
+preprocessing inside the container (see the operator runbook §1 for
+why this is unacceptable).
+
+Check first, then preprocess only the splits that are missing:
+
+```bash
+set -a; source .env; set +a
+for d in amazon ml-32m; do
+    n=$(aws s3 ls "$RQVAE_S3_BASE/datasets/${d}/processed/" \
+        --profile "$RQVAE_AWS_PROFILE" --region "$RQVAE_AWS_REGION" \
+        2>/dev/null | grep -c '\.pt$')
+    echo "$d: ${n} processed .pt files"
+done
+```
+
+- `amazon: 0` → run preprocessing for the Amazon splits in scope
+  (e.g. `--splits beauty,sports`).
+- `ml-32m: 0` → run preprocessing for ML32M (separate launch — see
+  §1.0.b below).
+- Both non-zero → skip §1.0 entirely.
+
+#### §1.0.a Amazon preprocessing (only if missing)
+
+```bash
+python sagemaker/launch/launch_preprocess_datasets.py \
+    --splits beauty,sports \
+    2>&1 | tee -a /tmp/sagemaker_jobs.log
+```
+
+Wait via §M1 (`--name-contains preprocess-`). Once Completed:
+
+```bash
+python sagemaker/launch/launch_preprocess_datasets.py \
+    --sync <preprocess-job-name>
+```
+
+The sync step extracts the output tarball and uploads to
+`$RQVAE_S3_BASE/datasets/amazon/{processed,raw}/`.
+
+#### §1.0.b ML32M preprocessing (only if missing and ML32M is in scope)
+
+Same launcher, different `--splits` value. Note the entry point
+already supports `ml32m`; the resulting tarball lands under
+`datasets/ml-32m/` (note the hyphen — matches `data/ml-32m/` in the
+gin configs).
+
+```bash
+python sagemaker/launch/launch_preprocess_datasets.py \
+    --splits ml32m \
+    2>&1 | tee -a /tmp/sagemaker_jobs.log
+```
+
+ML32M preprocessing is heavier than Amazon (32M ratings + Sentence-T5
+over ~86k movies). Expect 4–8 h on the default `ml.g5.4xlarge`. Wait
+via §M1, then `--sync` as above.
+
+If the ML32M preprocessing job itself fails (e.g. data-pipeline
+incompatibility surfaces — see AGENTS.md "ML32M pipeline
+compatibility — known risks"), drop ML32M from this session and
+proceed with Beauty + Sports only. Update the
+`docs/paper_plan_stage0_report.md` with the failure and continue.
+
 ### 1.1 Upload upstream checkpoints to S3 (idempotent)
 
 The validator launcher's `*_upstream` targets read from

@@ -21,6 +21,7 @@ channel at `/opt/ml/input/data/model` and the launcher rewrites the gin
 binding so `train_decoder.train.pretrained_rqvae_path` points there.
 """
 import argparse
+from datetime import datetime, timezone
 
 import boto3
 from _aws_env import aws_profile, aws_region, s3_base, sagemaker_role
@@ -133,6 +134,10 @@ def main() -> None:
     boto_sess = boto3.Session(profile_name=aws_profile(), region_name=aws_region())
     sess = sagemaker.Session(boto_session=boto_sess)
 
+    # Timestamp suffix so a relaunch doesn't collide with a prior Failed
+    # job's name (SageMaker requires unique training-job names).
+    stamp = f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
+
     for dataset in args.datasets:
         estimator = get_estimator(
             dataset,
@@ -152,7 +157,7 @@ def main() -> None:
             )
         if ds_s3:
             inputs["dataset"] = TrainingInput(ds_s3)
-        job_name = f"decoder-{dataset}"
+        job_name = f"decoder-{dataset}-{stamp}"
         estimator.fit(
             inputs=inputs if inputs else None,
             job_name=job_name,
