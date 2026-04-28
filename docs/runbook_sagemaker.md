@@ -694,6 +694,49 @@ cases below.
 | `[ALERT] kind=HANG_SUSPECT` (no status transition for > 1 h while `InProgress`) | Container hung (CUDA driver, deadlock, infinite loop) | Tail the logs manually for the past 30 min. If they show no new lines either: stop the job, relaunch. If they show progress: increase the hang threshold and keep polling. | Yes, after manual log inspection |
 | Job exists but `aws describe-training-job` returns `NotFound` | Region / profile mismatch, or typo in job name | Re-check `RQVAE_AWS_REGION` / `RQVAE_AWS_PROFILE` against the launcher's settings; fix and re-poll. | n/a |
 | Job sits `Starting` for > 20 min | Quota exhaustion or container-image pull failure | `describe-training-job --query FailureReason` will populate when SageMaker gives up. If quota: escalate. If image pull: stop, relaunch (transient). | Yes for image-pull |
+| Status `Completed` (exit 0) but every recall@K / ndcg@K row in the output CSV / JSON is exactly `0.0` | Silent — multiple possible causes: harness-vs-decoder SID-space mismatch, `strict=False` state-dict load that swallowed a shape mismatch, alpha=0 bypass broken in `LevelAwareHybridDecoding.expand`, RQ-VAE used at eval time differs from training time, or accumulator regression. AGENTS.md "alpha=0 bypass" invariant says `α=[0,0,0]` MUST equal `VanillaBeamSearch` on the same decoder — non-zero baseline + zero α=[0,0,0] proves the bypass or alpha_search.py is broken. | **Escalate.** Run the pair of diagnostic eval jobs in §M-zero-metrics below; do not rerun the failing harness or relaunch any α grid until the cause is known. | No |
+
+### §M-zero-metrics — diagnosing a Completed-but-all-zero result
+
+When a long-running alpha-search or eval job finishes "successfully"
+but every metric is `0.0`, the question is whether the harness or the
+decoder is broken. One pair of cheap eval jobs disambiguates.
+
+```bash
+set -a; source .env; set +a
+DATASET=<beauty|sports|ml32m>   # the dataset that produced zeros
+
+# (1) MTL decoder + vanilla beam search via run_eval.py.
+# At α=[0,0,0] the alpha_search harness is supposed to be byte-equivalent
+# to this — different code path, same expected output. If this gives
+# non-zero recall, the bug is in alpha_search.py / LevelAwareHybridDecoding.
+python sagemaker/launch/launch_decoding_eval.py \
+    --datasets "$DATASET" --strategies vanilla \
+    --decoder-variant mtl \
+    2>&1 | tee -a /tmp/sagemaker_jobs.log
+
+# (2) Vanilla decoder + vanilla beam search.
+# This is the same code path that produced known-good recall in earlier
+# eval-baseline-* runs. If THIS gives zero, something has regressed in
+# run_eval.py / metrics.py / the venv since this morning.
+python sagemaker/launch/launch_decoding_eval.py \
+    --datasets "$DATASET" --strategies vanilla \
+    --decoder-variant baseline \
+    2>&1 | tee -a /tmp/sagemaker_jobs.log
+```
+
+Decision matrix once both jobs land:
+
+| MTL+vanilla | Baseline+vanilla | Diagnosis |
+|---|---|---|
+| > 0 | > 0 | `evaluate/alpha_search.py` or `LevelAwareHybridDecoding.expand` is broken — the α=[0,0,0] bypass isn't byte-equivalent to base strategy. Investigate the bypass and the `acc.accumulate` call site. |
+| 0   | > 0 | The MTL decoder ckpt itself is broken — bad load (e.g. shape-mismatch swallowed by `strict=False`), or training didn't converge. Inspect the MTL training job's loss tail + `model_config`. |
+| 0   | 0   | Eval-harness regression in `run_eval.py` or `evaluate/metrics.py` since the last known-good run. Bisect against last-known-good commit. |
+| > 0 | 0   | Implausible (baseline is simpler). Flag for human review — likely venv / S3 corruption. |
+
+Do **not** relaunch the failing harness or any alpha grid until the
+matrix points at a specific code site. Do not edit configs or code
+without explicit instruction from the operator.
 
 How to stop a job (for any of the "stop, relaunch" cases above):
 
