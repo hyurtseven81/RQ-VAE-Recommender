@@ -267,6 +267,41 @@ level. A `healthy: false` flag with those minimums met is acceptable
 
 ## §2 Stage 1 — vanilla decoder + alpha-free strategy sweep
 
+### 2.0 Pre-check — verify the per-dataset gin config exists
+
+`launch_decoder.py::_gin_config(<dataset>)` resolves to
+`configs/decoder_amazon_<dataset>.gin` for Amazon splits.
+**Confirm the file exists before launching** — an earlier session lost
+~46 min of decoder-sports training because the launcher used a
+generic `decoder_amazon.gin` that hard-coded `dataset_split="beauty"`,
+so the "sports" job actually trained a beauty-split model. The
+launcher now points at per-dataset configs, but if any are missing
+(e.g. someone deletes one), the launch fails fast at gin parse rather
+than silently mis-routing.
+
+```bash
+for d in beauty sports ml32m; do
+    [ -f "configs/decoder_${d/ml32m/ml32m}.gin" ] || \
+    [ -f "configs/decoder_amazon_${d}.gin" ] || \
+        { echo "MISSING: configs/decoder_amazon_${d}.gin"; exit 1; }
+done
+echo "gin configs OK for all datasets"
+```
+
+If any prior `decoder-<dataset>` job finished before this commit
+landed (ie the agent ran §2.1 against the buggy launcher), inspect
+its output ckpt for the `dataset_split` of its training data. The
+fastest tell is loading the saved `model_config` and checking
+`num_items` — Beauty has ~12k, Sports ~18k, Toys ~12k. If the
+ckpt's `num_items` doesn't match the dataset name, **delete the bad
+ckpt from S3** and relaunch:
+
+```bash
+# Example: nuke a wrong-split decoder-sports/ output before relaunching.
+aws s3 rm "$RQVAE_S3_BASE/decoder/sports/" --recursive \
+    --profile "$RQVAE_AWS_PROFILE" --region "$RQVAE_AWS_REGION"
+```
+
 ### 2.1 Launch decoder training (one job per dataset)
 
 Each training is ~12–20 h on `ml.g5.2xlarge` spot. They can run in

@@ -69,11 +69,10 @@ def _gin_config(dataset: str, variant: str) -> str:
     if dataset == "ml1m":
         # Only an MTL config exists for ML1M currently.
         return "configs/decoder_ml1m_mtl.gin"
-    # Amazon datasets: per-split MTL configs exist; for baseline fall back to
-    # the generic Amazon template.
+    # Amazon datasets: per-split configs for both vanilla and MTL.
     if variant == "mtl":
         return f"configs/decoder_amazon_{dataset}_mtl.gin"
-    return "configs/decoder_amazon.gin"
+    return f"configs/decoder_amazon_{dataset}.gin"
 
 
 def _latest_artifact(s3_client, bucket: str, prefix: str, suffix: str) -> str | None:

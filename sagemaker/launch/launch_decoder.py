@@ -39,7 +39,11 @@ def _gin_config(dataset: str) -> str:
         return "configs/decoder_steam.gin"
     if dataset == "ml32m":
         return "configs/decoder_ml32m.gin"
-    return "configs/decoder_amazon.gin"
+    # Amazon: per-dataset config so dataset_split / pretrained_rqvae_path are
+    # right. The earlier generic configs/decoder_amazon.gin hard-coded
+    # dataset_split="beauty" and routed here for sports too — the resulting
+    # decoder-sports job actually trained a beauty-split model. Don't reuse.
+    return f"configs/decoder_amazon_{dataset}.gin"
 
 
 def get_estimator(

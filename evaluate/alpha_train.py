@@ -45,6 +45,9 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+# noqa: F401 — registering train_decoder_mtl makes its @gin.configurable
+# train_mtl visible so configs/decoder_*_mtl.gin parse cleanly here.
+import train_decoder_mtl  # noqa: F401
 from data.processed import RecDataset
 from data.utils import batch_to
 from evaluate.run_eval import _resolve_ckpt
@@ -192,41 +195,10 @@ def main() -> None:
     device = accelerator.device
     dataset_split = args.dataset_split or args.dataset
 
-    @gin.configurable
-    def _arch(
-        vae_input_dim: int = 768,
-        vae_hidden_dims: list | None = None,
-        vae_embed_dim: int = 32,
-        vae_n_cat_feats: int = 0,
-        vae_codebook_size: int = 256,
-        vae_n_layers: int = 3,
-        vae_codebook_normalize: bool = False,
-        vae_sim_vq: bool = False,
-        t5_d_model: int = 384,
-        t5_num_heads: int = 6,
-        t5_d_ff: int = 1024,
-        t5_num_layers: int = 4,
-        top_k_for_generation: int = 10,
-        should_add_sep_token: bool = True,
-    ) -> dict:
-        return dict(
-            vae_input_dim=vae_input_dim,
-            vae_hidden_dims=vae_hidden_dims or [512, 256, 128],
-            vae_embed_dim=vae_embed_dim,
-            vae_n_cat_feats=vae_n_cat_feats,
-            vae_codebook_size=vae_codebook_size,
-            vae_n_layers=vae_n_layers,
-            vae_codebook_normalize=vae_codebook_normalize,
-            vae_sim_vq=vae_sim_vq,
-            t5_d_model=t5_d_model,
-            t5_num_heads=t5_num_heads,
-            t5_d_ff=t5_d_ff,
-            t5_num_layers=t5_num_layers,
-            top_k_for_generation=top_k_for_generation,
-            should_add_sep_token=should_add_sep_token,
-        )
-
-    arch = _arch()
+    # Architecture kwargs — query gin (train_mtl.* or train.*) so non-Amazon
+    # datasets (e.g. ML32M with vae_embed_dim=64) reconstruct correctly.
+    from evaluate._arch import get_arch
+    arch = get_arch()
 
     dataset_enum_map = {
         "beauty": RecDataset.AMAZON, "sports": RecDataset.AMAZON,

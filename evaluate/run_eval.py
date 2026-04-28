@@ -38,6 +38,9 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+# noqa: F401 — registering train_decoder_mtl makes its @gin.configurable
+# train_mtl visible so configs/decoder_*_mtl.gin parse cleanly here.
+import train_decoder_mtl  # noqa: F401
 from data.processed import RecDataset
 from data.utils import batch_to
 from evaluate.metrics import TopKAccumulator
@@ -283,48 +286,11 @@ def main() -> None:
 
     dataset_split = args.dataset_split or args.dataset
 
-    # ------------------------------------------------------------------
-    # Build model via shared setup helper (reuses train_decoder.py logic)
-    # ------------------------------------------------------------------
-    # Fall back to standard Amazon architecture constants when no gin config.
-    # These match the default configs/decoder_amazon*.gin values.
-    @gin.configurable
-    def _get_arch(
-        vae_input_dim: int = 768,
-        vae_hidden_dims: list = None,
-        vae_embed_dim: int = 32,
-        vae_n_cat_feats: int = 0,
-        vae_codebook_size: int = 256,
-        vae_n_layers: int = 3,
-        vae_codebook_normalize: bool = False,
-        vae_sim_vq: bool = False,
-        t5_d_model: int = 384,
-        t5_num_heads: int = 6,
-        t5_d_ff: int = 1024,
-        t5_num_layers: int = 4,
-        top_k_for_generation: int = 10,
-        should_add_sep_token: bool = True,
-        batch_size: int = 256,
-    ) -> dict:
-        return {
-            "vae_input_dim": vae_input_dim,
-            "vae_hidden_dims": vae_hidden_dims or [512, 256, 128],
-            "vae_embed_dim": vae_embed_dim,
-            "vae_n_cat_feats": vae_n_cat_feats,
-            "vae_codebook_size": vae_codebook_size,
-            "vae_n_layers": vae_n_layers,
-            "vae_codebook_normalize": vae_codebook_normalize,
-            "vae_sim_vq": vae_sim_vq,
-            "t5_d_model": t5_d_model,
-            "t5_num_heads": t5_num_heads,
-            "t5_d_ff": t5_d_ff,
-            "t5_num_layers": t5_num_layers,
-            "top_k_for_generation": top_k_for_generation,
-            "should_add_sep_token": should_add_sep_token,
-            "batch_size": args.batch_size or batch_size,
-        }
-
-    arch = _get_arch()
+    # Architecture kwargs — query gin (train_mtl.* or train.*) so non-Amazon
+    # datasets (e.g. ML32M with vae_embed_dim=64) reconstruct correctly.
+    from evaluate._arch import get_arch
+    arch = get_arch()
+    arch["batch_size"] = args.batch_size or 256
 
     # Determine dataset enum
     dataset_enum_map = {
