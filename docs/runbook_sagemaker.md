@@ -33,6 +33,15 @@ The experimental scope is `docs/paper_plan.md`; this runbook is the
   failure pattern to a concrete recommended action (auto-retry vs
   escalate). Apply auto-retry only when the table explicitly tags
   the symptom as "Agent OK to retry"; everything else escalates.
+- **Do not import the eval / training entry points locally to "verify"
+  anything.** `evaluate.alpha_search`, `evaluate.run_eval`,
+  `evaluate.alpha_train`, `train_decoder`, and `train_decoder_mtl`
+  transitively pull `sentence_transformers`, `wandb`, and the
+  `data.processed` chain — any of which can block on a slow laptop
+  network for arbitrary time. Use `scripts/verify_gin_configs.py` for
+  the bounded gin-parse check (§2.0.b); for everything else,
+  SageMaker is the canonical verifier. Don't waste hours on local
+  imports that the cloud container will resolve in seconds.
 - Cap polling loops at the documented timeouts. If a job exceeds them,
   stop polling and ask the operator how to proceed.
 - Capture every launched job name into `/tmp/sagemaker_jobs.log` so
@@ -279,19 +288,37 @@ launcher now points at per-dataset configs, but if any are missing
 (e.g. someone deletes one), the launch fails fast at gin parse rather
 than silently mis-routing.
 
+Two sanity checks. Both are bounded; do not let them block.
+
+#### §2.0.a File-existence check (always cheap)
+
 ```bash
 for d in beauty sports ml32m; do
     [ -f "configs/decoder_${d/ml32m/ml32m}.gin" ] || \
     [ -f "configs/decoder_amazon_${d}.gin" ] || \
         { echo "MISSING: configs/decoder_amazon_${d}.gin"; exit 1; }
 done
-echo "gin configs OK for all datasets"
+echo "gin configs present for all datasets"
 ```
 
-If any prior `decoder-<dataset>` job finished before this commit
-landed (ie the agent ran §2.1 against the buggy launcher), inspect
-its output ckpt for the `dataset_split` of its training data. The
-fastest tell is loading the saved `model_config` and checking
+#### §2.0.b Gin-parse check (bounded; skip if it hangs)
+
+```bash
+timeout 60 python scripts/verify_gin_configs.py
+```
+
+The script disables wandb + HF Hub network probes via env vars and
+imports only the two `@gin.configurable` registry modules
+(`train_decoder`, `train_decoder_mtl`) — it does **not** pull
+`sentence_transformers` / `evaluate.alpha_search` / `data.processed`,
+so it's ~5 s on a cold venv. If `timeout 60` fires anyway, the laptop
+network or wandb auth is the issue, not the codebase. **Skip this
+sub-step and let SageMaker be the real verifier** — proceed to §2.1.
+
+If any prior `decoder-<dataset>` job finished before the per-dataset
+configs landed (i.e. the agent ran §2.1 against the buggy launcher),
+inspect its output ckpt for the `dataset_split` of its training data.
+The fastest tell is loading the saved `model_config` and checking
 `num_items` — Beauty has ~12k, Sports ~18k, Toys ~12k. If the
 ckpt's `num_items` doesn't match the dataset name, **delete the bad
 ckpt from S3** and relaunch:
