@@ -22,12 +22,12 @@ import argparse
 from datetime import datetime, timezone
 
 import boto3
-import sagemaker
+from _aws_env import aws_profile, aws_region, s3_base, sagemaker_role
 from sagemaker.inputs import TrainingInput
 from sagemaker.pytorch import PyTorch
 
+import sagemaker
 
-S3_BASE = "s3://REDACTED-BUCKET/rqvae-level-aware"
 DATASETS = ["beauty", "sports", "toys", "steam"]
 
 
@@ -40,9 +40,9 @@ def _gin_config(dataset: str) -> str:
 def _dataset_channel(dataset: str) -> str | None:
     """S3 URI for the preprocessed dataset cache. None if no cache exists yet."""
     if dataset in ("beauty", "sports", "toys"):
-        return f"{S3_BASE}/datasets/amazon/"
+        return f"{s3_base()}/datasets/amazon/"
     if dataset == "steam":
-        return f"{S3_BASE}/datasets/steam/"  # may not exist yet
+        return f"{s3_base()}/datasets/steam/"  # may not exist yet
     return None
 
 
@@ -58,13 +58,13 @@ def get_estimator(
     kwargs = dict(
         entry_point="sagemaker/rqvae_sanity_entry.py",
         source_dir=".",
-        role="arn:aws:iam::000000000000:role/REDACTED-ROLE",
+        role=sagemaker_role(),
         instance_type=instance_type,
         instance_count=1,
         framework_version="2.5.1",
         py_version="py311",
         sagemaker_session=sess,
-        output_path=f"{S3_BASE}/rqvae-sanity/{output_subpath}/",
+        output_path=f"{s3_base()}/rqvae-sanity/{output_subpath}/",
         use_spot_instances=False,
         max_run=5400,  # 90 min; covers container startup + 5k iters + validator
         hyperparameters={
@@ -108,7 +108,7 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    boto_sess = boto3.Session(profile_name="REDACTED-PROFILE", region_name="us-east-1")
+    boto_sess = boto3.Session(profile_name=aws_profile(), region_name=aws_region())
     sess = sagemaker.Session(boto_session=boto_sess)
 
     for dataset in args.datasets:
@@ -136,7 +136,7 @@ def main() -> None:
         estimator.fit(inputs=inputs, job_name=job_name, wait=False, logs=False)
         print(f"Launched: {job_name}")
 
-    print(f"\nResults will land at: {S3_BASE}/rqvae-sanity/")
+    print(f"\nResults will land at: {s3_base()}/rqvae-sanity/")
 
 
 if __name__ == "__main__":

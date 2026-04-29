@@ -15,7 +15,9 @@ per-user metrics, making paired bootstrap and per-segment analysis impossible):
 
 Usage (from the compute machine)::
 
-    python scripts/collect_results.py --bucket REDACTED-BUCKET --prefix rqvae-level-aware
+    # --bucket defaults to the bucket in $RQVAE_S3_BASE
+    python scripts/collect_results.py --prefix rqvae-level-aware
+    python scripts/collect_results.py --bucket <your-bucket> --prefix rqvae-level-aware
 """
 import argparse
 import json
@@ -30,21 +32,68 @@ import pandas as pd
 
 
 def download_results(bucket: str, prefix: str, local_dir: str) -> list[dict]:
-    """Download all result JSONs from S3 and return as list of dicts."""
+    """Download all result JSONs from S3 and return as list of dicts.
+
+    run_eval.py writes result JSONs to /opt/ml/output/data which SageMaker
+    packs into an ``output.tar.gz``. This function accepts a prefix that
+    points at (or above) the eval-results tree, downloads every object
+    under it ending in ``.json`` or ``.tar.gz``, extracts tarballs, and
+    returns the union of parsed JSONs.
+
+    AWS credentials come from the usual boto3 chain; ``RQVAE_AWS_PROFILE``
+    (or ``AWS_PROFILE``) selects the profile used for the S3 scan.
+    """
+    import tarfile
+
     import boto3  # lazy: not needed for helper tests
 
-    s3 = boto3.client("s3")
-    results = []
+    profile = os.environ.get("RQVAE_AWS_PROFILE") or os.environ.get("AWS_PROFILE")
+    region = (
+        os.environ.get("RQVAE_AWS_REGION")
+        or os.environ.get("AWS_REGION")
+        or "us-east-1"
+    )
+    boto_sess = boto3.Session(profile_name=profile, region_name=region)
+    s3 = boto_sess.client("s3")
+
+    results: list[dict] = []
     paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=f"{prefix}/results/"):
+    # Previously this function hardcoded an extra ``/results/`` suffix which
+    # never existed on S3. Paginate under the caller-supplied prefix directly.
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix.rstrip("/") + "/"):
         for obj in page.get("Contents", []):
             key = obj["Key"]
-            if not key.endswith(".json"):
+            fname = Path(key).name
+            if not (key.endswith(".json") or key.endswith(".tar.gz")):
                 continue
-            local_path = Path(local_dir) / Path(key).name
+            local_path = Path(local_dir) / key.replace("/", "__")
+            local_path.parent.mkdir(parents=True, exist_ok=True)
             s3.download_file(bucket, key, str(local_path))
-            with open(local_path) as f:
-                results.append(json.load(f))
+
+            if fname.endswith(".json"):
+                try:
+                    with local_path.open() as f:
+                        results.append(json.load(f))
+                except (json.JSONDecodeError, OSError) as e:
+                    print(f"[warn] could not parse {key}: {e}")
+                continue
+
+            # tar.gz: extract and sweep for any *.json file inside
+            extract_dir = local_path.with_suffix("").with_suffix(".extracted")
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                with tarfile.open(local_path) as tf:
+                    tf.extractall(extract_dir)
+            except (tarfile.TarError, OSError) as e:
+                print(f"[warn] could not extract {key}: {e}")
+                continue
+            for json_file in extract_dir.rglob("*.json"):
+                try:
+                    with json_file.open() as f:
+                        results.append(json.load(f))
+                except (json.JSONDecodeError, OSError) as e:
+                    print(f"[warn] could not parse {json_file}: {e}")
+
     return results
 
 
@@ -102,8 +151,13 @@ def main():
     import pyarrow as pa  # lazy: not needed for helper tests
     import pyarrow.parquet as pq
 
+    # Default bucket is the one encoded in RQVAE_S3_BASE (shape s3://bucket/prefix).
+    default_bucket = None
+    env_base = os.environ.get("RQVAE_S3_BASE", "").removeprefix("s3://").strip("/")
+    if env_base:
+        default_bucket = env_base.split("/", 1)[0]
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bucket", default="REDACTED-BUCKET")
+    parser.add_argument("--bucket", default=default_bucket, required=default_bucket is None)
     parser.add_argument("--prefix", default="rqvae-level-aware")
     parser.add_argument("--local-results", default="results/raw_json")
     parser.add_argument(

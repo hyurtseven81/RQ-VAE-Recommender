@@ -1,6 +1,16 @@
 """SageMaker estimator factory for vanilla decoder training jobs."""
-import sagemaker
+import os
+
 from sagemaker.pytorch import PyTorch
+
+import sagemaker
+
+_S3_BASE = os.environ.get("RQVAE_S3_BASE", "").rstrip("/")
+if not _S3_BASE:
+    raise RuntimeError(
+        "RQVAE_S3_BASE not set. Example: "
+        "export RQVAE_S3_BASE=s3://<your-bucket>/rqvae-level-aware"
+    )
 
 
 def get_estimator(dataset: str, instance_type: str = "ml.g5.2xlarge") -> PyTorch:
@@ -12,8 +22,8 @@ def get_estimator(dataset: str, instance_type: str = "ml.g5.2xlarge") -> PyTorch
         instance_count=1,
         framework_version="2.5.1",
         py_version="py311",
-        output_path=f"s3://REDACTED-BUCKET/rqvae-level-aware/decoder/{dataset}/",
-        checkpoint_s3_uri=f"s3://REDACTED-BUCKET/rqvae-level-aware/checkpoints/decoder/{dataset}/",
+        output_path=f"{_S3_BASE}/decoder/{dataset}/",
+        checkpoint_s3_uri=f"{_S3_BASE}/checkpoints/decoder/{dataset}/",
         use_spot_instances=True,
         max_run=72000,
         max_wait=144000,

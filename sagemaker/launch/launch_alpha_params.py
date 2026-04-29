@@ -1,28 +1,29 @@
-"""Launch alpha grid-search jobs on SageMaker (Stage 2 of the paper plan).
+"""Launch learned-alpha training jobs on SageMaker (Stage 2 — learned variant).
 
-One SageMaker job per dataset. Each job builds the MTL decoder + RQ-VAE
-once, then iterates a per-level alpha grid — much cheaper than spawning
-one job per alpha point.
+One SageMaker job per dataset. Each job loads the dataset's MTL decoder +
+RQ-VAE, freezes them, and trains an ``AlphaParams`` module via the
+teacher-forced mixed cross-entropy loss (see ``evaluate/alpha_train.py``).
+The resulting ``*.pt`` can be fed into
+``sagemaker/launch/launch_decoding_eval.py --alpha-ckpt ...`` with the
+``level_aware_mix_learned`` strategy.
 
 Usage::
 
-    # Pilot — 3^3 = 27 alpha points per dataset.
-    python sagemaker/launch/launch_alpha_search.py \\
+    python sagemaker/launch/launch_alpha_params.py \\
         --datasets beauty sports ml32m \\
-        --alpha-grid "0.0,0.5,1.0" \\
-        --job-suffix pilot
+        --init-alpha "0.5,0.5,0.5" \\
+        --n-epochs 1
 
-    # Refined grid centred on each dataset's pilot winner (per-dataset grids).
-    python sagemaker/launch/launch_alpha_search.py \\
+    # Override ckpts for a one-off dataset:
+    python sagemaker/launch/launch_alpha_params.py \\
         --datasets beauty \\
-        --alpha0-grid "0.3,0.4,0.5,0.6,0.7" \\
-        --alpha1-grid "0.3,0.4,0.5,0.6,0.7" \\
-        --alpha2-grid "0.0,0.1,0.2,0.3,0.4" \\
-        --job-suffix refined
+        --decoder-ckpt s3://bucket/prefix/decoder-mtl/beauty/<job>/output/model.tar.gz \\
+        --rqvae-ckpt   s3://bucket/prefix/checkpoints/rqvae_beauty_upstream/checkpoint_high_entropy.pt
 
-The launcher auto-discovers ckpt URIs (MTL decoder + upstream RQ-VAE) from
-S3. Pass `--decoder-ckpt` / `--rqvae-ckpt` to override with explicit URIs
-(only valid with a single --datasets value).
+Defaults:
+  - on-demand ``ml.g5.2xlarge`` (gradient-state matters; spot interruptions
+    would cost progress).
+  - 1 epoch, lr=0.05, init alpha=sigmoid(0)=0.5 per level.
 """
 import argparse
 import re
@@ -89,8 +90,10 @@ def get_estimator(
     dataset: str,
     instance_type: str,
     sess: sagemaker.Session,
-    alpha_grid: str | None,
-    alpha_level_grids: dict[str, str],
+    init_alpha: str | None,
+    lr: float,
+    n_epochs: int,
+    max_steps: int,
     job_suffix: str,
     use_spot: bool,
 ) -> PyTorch:
@@ -99,17 +102,18 @@ def get_estimator(
         "decoder-checkpoint": "/opt/ml/input/data/decoder",
         "rqvae-checkpoint": "/opt/ml/input/data/rqvae",
         "dataset": dataset,
-        "output": "/opt/ml/output/data",
-        "job-name": _sanitize(f"alpha-{dataset}-{job_suffix}"),
+        "output": f"/opt/ml/model/{dataset}_learned.pt",
+        "lr": str(lr),
+        "n-epochs": str(n_epochs),
+        "job-name": _sanitize(f"alpha-learned-{dataset}-{job_suffix}"),
     }
-    if alpha_grid:
-        hyperparameters["alpha-grid"] = alpha_grid
-    for lvl_flag, spec in alpha_level_grids.items():
-        if spec:
-            hyperparameters[lvl_flag] = spec
+    if init_alpha:
+        hyperparameters["init-alpha"] = init_alpha
+    if max_steps > 0:
+        hyperparameters["max-steps"] = str(max_steps)
 
     kwargs = dict(
-        entry_point="evaluate/alpha_search.py",
+        entry_point="evaluate/alpha_train.py",
         source_dir=".",
         role=sagemaker_role(),
         instance_type=instance_type,
@@ -117,17 +121,21 @@ def get_estimator(
         framework_version="2.5.1",
         py_version="py311",
         sagemaker_session=sess,
-        output_path=f"{s3_base()}/alpha-search/{dataset}-{job_suffix}/",
+        output_path=f"{s3_base()}/alpha-learned/{dataset}-{job_suffix}/",
+        checkpoint_s3_uri=f"{s3_base()}/checkpoints/alpha-learned/{dataset}-{job_suffix}/",
         max_run=28800,
         hyperparameters=hyperparameters,
         tags=[
             {"Key": "project", "Value": "rqvae-level-aware"},
             {"Key": "owner", "Value": "huseyin"},
-            {"Key": "job-type", "Value": "alpha-search"},
+            {"Key": "job-type", "Value": "alpha-learned"},
             {"Key": "variant", "Value": job_suffix},
         ],
     )
     if use_spot:
+        # On-demand default — gradient state is non-trivial and a spot
+        # preemption loses the optimiser state entirely. Pass --spot
+        # explicitly if you want to opt in.
         kwargs.update(use_spot_instances=True, max_wait=57600)
     else:
         kwargs["use_spot_instances"] = False
@@ -135,20 +143,24 @@ def get_estimator(
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Launch per-level alpha grid search.")
+    p = argparse.ArgumentParser(
+        description="Launch learned-alpha training (Stage 2, learned variant)."
+    )
     p.add_argument("--datasets", nargs="+", choices=DATASETS,
                    default=["beauty", "sports", "ml32m"])
-    p.add_argument("--instance-type", default="ml.g5.xlarge")
-    p.add_argument("--no-spot", action="store_true")
-    p.add_argument("--job-suffix", default="pilot",
-                   help="Appended to output path and job name so pilot/refined "
-                        "runs don't collide (e.g. 'pilot', 'refined', 'cw01').")
-    p.add_argument("--alpha-grid", default="0.0,0.5,1.0",
-                   help="Shared grid applied to every level (cartesian). Ignored "
-                        "for a level if --alphaN-grid is also passed.")
-    p.add_argument("--alpha0-grid", default=None)
-    p.add_argument("--alpha1-grid", default=None)
-    p.add_argument("--alpha2-grid", default=None)
+    p.add_argument("--instance-type", default="ml.g5.2xlarge")
+    p.add_argument("--spot", action="store_true",
+                   help="Opt in to spot instances (default off — gradient state "
+                        "lost on preemption).")
+    p.add_argument("--job-suffix", default="learned")
+    p.add_argument("--init-alpha", default=None,
+                   help="Comma-separated initial alpha per level (e.g. '0.5,0.5,0.5'). "
+                        "Default sigmoid(0)=0.5 per level.")
+    p.add_argument("--lr", type=float, default=0.05)
+    p.add_argument("--n-epochs", type=int, default=1)
+    p.add_argument("--max-steps", type=int, default=0,
+                   help="Cap training steps per epoch (useful for quick runs). "
+                        "0 = full epoch.")
     p.add_argument("--decoder-ckpt", default=None,
                    help="Override MTL decoder S3 URI (requires single --datasets).")
     p.add_argument("--rqvae-ckpt", default=None,
@@ -176,32 +188,25 @@ def main() -> None:
             print(f"[SKIP] no RQ-VAE ckpt for {dataset}")
             continue
 
-        estimator = get_estimator(
-            dataset,
-            args.instance_type,
-            sess,
-            alpha_grid=args.alpha_grid,
-            alpha_level_grids={
-                "alpha0-grid": args.alpha0_grid,
-                "alpha1-grid": args.alpha1_grid,
-                "alpha2-grid": args.alpha2_grid,
-            },
-            job_suffix=args.job_suffix,
-            use_spot=not args.no_spot,
+        est = get_estimator(
+            dataset, args.instance_type, sess,
+            init_alpha=args.init_alpha, lr=args.lr,
+            n_epochs=args.n_epochs, max_steps=args.max_steps,
+            job_suffix=args.job_suffix, use_spot=args.spot,
         )
         inputs = {
             "decoder": TrainingInput(decoder_ckpt),
             "rqvae": TrainingInput(rqvae_ckpt),
         }
-        job_name = _sanitize(f"alpha-{dataset}-{args.job_suffix}-{stamp}")
-        estimator.fit(inputs=inputs, job_name=job_name, wait=False, logs=False)
+        job_name = _sanitize(f"alpha-learned-{dataset}-{args.job_suffix}-{stamp}")
+        est.fit(inputs=inputs, job_name=job_name, wait=False, logs=False)
         print(f"Launched: {job_name}")
         print(f"  decoder={decoder_ckpt}")
         print(f"  rqvae  ={rqvae_ckpt}")
         launched += 1
 
-    print(f"\nSubmitted {launched} alpha-search job(s). "
-          f"Results at: {s3_base()}/alpha-search/")
+    print(f"\nSubmitted {launched} learned-alpha job(s). "
+          f"Outputs at: {s3_base()}/alpha-learned/")
 
 
 if __name__ == "__main__":

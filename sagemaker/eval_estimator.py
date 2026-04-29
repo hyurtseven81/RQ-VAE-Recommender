@@ -1,6 +1,16 @@
 """SageMaker estimator factory for inference-only evaluation jobs."""
-import sagemaker
+import os
+
 from sagemaker.pytorch import PyTorch
+
+import sagemaker
+
+_S3_BASE = os.environ.get("RQVAE_S3_BASE", "").rstrip("/")
+if not _S3_BASE:
+    raise RuntimeError(
+        "RQVAE_S3_BASE not set. Example: "
+        "export RQVAE_S3_BASE=s3://<your-bucket>/rqvae-level-aware"
+    )
 
 
 def get_estimator(
@@ -25,7 +35,7 @@ def get_estimator(
         instance_count=1,
         framework_version="2.5.1",
         py_version="py311",
-        output_path=f"s3://REDACTED-BUCKET/rqvae-level-aware/eval-results/{dataset}/",
+        output_path=f"{_S3_BASE}/eval-results/{dataset}/",
         use_spot_instances=True,
         max_run=14400,
         max_wait=28800,

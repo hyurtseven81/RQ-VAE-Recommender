@@ -12,15 +12,13 @@ import argparse
 from datetime import datetime, timezone
 
 import boto3
-import sagemaker
+from _aws_env import aws_profile, aws_region, s3_base, sagemaker_role
 from sagemaker.inputs import TrainingInput
 from sagemaker.pytorch import PyTorch
 
+import sagemaker
 
 DATASETS = ["beauty", "sports", "toys", "steam"]
-S3_BASE = "s3://REDACTED-BUCKET/rqvae-level-aware"
-
-
 def _gin_config(dataset: str) -> str:
     if dataset == "steam":
         return "configs/rqvae_steam.gin"
@@ -39,13 +37,13 @@ def get_estimator(
     kwargs = dict(
         entry_point="train_rqvae.py",
         source_dir=".",
-        role="arn:aws:iam::000000000000:role/REDACTED-ROLE",
+        role=sagemaker_role(),
         instance_type=instance_type,
         instance_count=1,
         framework_version="2.5.1",
         py_version="py311",
         sagemaker_session=sess,
-        output_path=f"{S3_BASE}/rqvae/{output_subpath}/",
+        output_path=f"{s3_base()}/rqvae/{output_subpath}/",
         hyperparameters={"config_path": gin_config},
         tags=[
             {"Key": "project", "Value": "rqvae-level-aware"},
@@ -59,7 +57,7 @@ def get_estimator(
             use_spot_instances=True,
             max_run=36000,
             max_wait=72000,
-            checkpoint_s3_uri=f"{S3_BASE}/checkpoints/rqvae/{output_subpath}/",
+            checkpoint_s3_uri=f"{s3_base()}/checkpoints/rqvae/{output_subpath}/",
         )
     else:
         kwargs.update(use_spot_instances=False, max_run=36000)
@@ -86,9 +84,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--dataset-s3",
-        default=f"{S3_BASE}/datasets/amazon/",
+        default=None,
         help="S3 URI with preprocessed dataset cache (passed as 'dataset' channel). "
-             "Pass empty string to force fresh preprocessing inside the container.",
+             "Defaults to $RQVAE_S3_BASE/datasets/amazon/. Pass empty string to "
+             "force fresh preprocessing inside the container.",
     )
     parser.add_argument(
         "--disable-compile",
@@ -98,7 +97,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    boto_sess = boto3.Session(profile_name="REDACTED-PROFILE", region_name="us-east-1")
+    boto_sess = boto3.Session(profile_name=aws_profile(), region_name=aws_region())
     sess = sagemaker.Session(boto_session=boto_sess)
 
     gin_config = args.gin_config or _gin_config(args.dataset)
@@ -108,15 +107,16 @@ def main() -> None:
         disable_compile=args.disable_compile,
     )
     inputs = {}
-    if args.dataset_s3:
-        inputs["dataset"] = TrainingInput(args.dataset_s3)
+    dataset_s3 = args.dataset_s3 if args.dataset_s3 is not None else f"{s3_base()}/datasets/amazon/"
+    if dataset_s3:
+        inputs["dataset"] = TrainingInput(dataset_s3)
     job_stub = f"rqvae-{args.dataset}"
     if args.job_suffix:
         job_stub += f"-{args.job_suffix}"
     job_name = f"{job_stub}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
     estimator.fit(inputs=inputs, job_name=job_name, wait=False, logs=False)
     print(f"Launched: {job_name}")
-    print(f"Output:   {S3_BASE}/rqvae/{output_subpath}/")
+    print(f"Output:   {s3_base()}/rqvae/{output_subpath}/")
 
 
 if __name__ == "__main__":

@@ -28,7 +28,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tarfile
 import time
+from pathlib import Path
 
 import gin
 import torch
@@ -36,6 +38,9 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+# noqa: F401 — registering train_decoder_mtl makes its @gin.configurable
+# train_mtl visible so configs/decoder_*_mtl.gin parse cleanly here.
+import train_decoder_mtl  # noqa: F401
 from data.processed import RecDataset
 from data.utils import batch_to
 from evaluate.metrics import TopKAccumulator
@@ -47,6 +52,78 @@ from modules.decoding.vanilla import VanillaBeamSearch
 from modules.heads.sasrec_head import SASRecAuxHead
 from modules.tokenizer.semids import SemanticIdTokenizer
 from train_decoder import _setup_training
+
+
+def _resolve_file(path: str, exts: tuple[str, ...]) -> str:
+    """Return a local path to a file with one of the given extensions.
+
+    Accepts either the file itself, or a directory that contains exactly
+    one matching file (the SageMaker channel-mount shape when a launcher
+    passes a file as a TrainingInput). Also auto-extracts a
+    ``model.tar.gz`` if that's what the mount point contains.
+    """
+    p = Path(path)
+    if p.is_file() and p.name.endswith(exts):
+        return str(p)
+    if p.is_dir():
+        # Handle tar.gz mounts (e.g. alpha-search output tarballs)
+        matches = [m for m in p.rglob("*") if m.is_file() and m.name.endswith(exts)]
+        if not matches:
+            for tarball in p.rglob("*.tar.gz"):
+                with tarfile.open(tarball) as tf:
+                    tf.extractall(p)
+                break
+            matches = [
+                m for m in p.rglob("*") if m.is_file() and m.name.endswith(exts)
+            ]
+        if not matches:
+            raise FileNotFoundError(
+                f"No file with extension {exts} under {path}; "
+                f"contains: {[m.name for m in p.rglob('*') if m.is_file()][:10]}"
+            )
+        # If multiple, prefer ones whose name indicates the canonical artefact.
+        for cand in matches:
+            if "best" in cand.name or cand.name.startswith("checkpoint_"):
+                return str(cand)
+        return str(matches[0])
+    raise FileNotFoundError(path)
+
+
+def _resolve_ckpt(path: str) -> str:
+    """Resolve a checkpoint path that may be a .pt file, a directory
+    containing a .pt, or a directory containing a model.tar.gz (as SageMaker
+    mounts training-input channels). Returns a local path to the .pt file.
+    """
+    p = Path(path)
+    if p.is_file():
+        if p.suffix == ".pt":
+            return str(p)
+        if p.name.endswith(".tar.gz"):
+            extract_dir = Path("/tmp") / f"ckpt_{p.stem.replace('.', '_')}"
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(p) as tf:
+                tf.extractall(extract_dir)
+            p = extract_dir
+        else:
+            return str(p)
+    if p.is_dir():
+        # Extract any tarballs first — SageMaker mounts tar.gz entries verbatim
+        # into training-input channels; they need unpacking before load.
+        existing_pts = list(p.rglob("*.pt"))
+        if not existing_pts:
+            for tarball in p.rglob("*.tar.gz"):
+                with tarfile.open(tarball) as tf:
+                    tf.extractall(p)
+                break
+        pts = sorted(p.rglob("*.pt"))
+        if not pts:
+            raise FileNotFoundError(f"No .pt file under {path}")
+        # Prefer 'best' / 'checkpoint_' entries over arbitrary .pt artefacts.
+        for cand in pts:
+            if "best" in cand.name or cand.name.startswith("checkpoint_"):
+                return str(cand)
+        return str(pts[-1])
+    raise FileNotFoundError(path)
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -140,18 +217,41 @@ def _build_strategy(
         elif strategy_name == "level_aware_mix_learned" or args.alpha_ckpt is not None:
             if args.alpha_ckpt is None:
                 raise ValueError("level_aware_mix_learned requires --alpha-ckpt.")
-            state = torch.load(args.alpha_ckpt, map_location="cpu")
+            alpha_ckpt_local = _resolve_file(args.alpha_ckpt, exts=(".pt",))
+            state = torch.load(alpha_ckpt_local, map_location="cpu")
+            # alpha_train.py saves {"alpha_params_state_dict": ..., "phi": ..., ...}.
+            # Older formats may nest under "alpha_params" or keep the phi tensor
+            # at the top level; handle all three shapes.
+            if "alpha_params_state_dict" in state:
+                inner = state["alpha_params_state_dict"]
+            elif "alpha_params" in state:
+                inner = state["alpha_params"]
+            else:
+                inner = state
             params = AlphaParams(n_levels=n_levels)
-            params.load_state_dict(state if "phi" in state else state.get("alpha_params", state))
+            params.load_state_dict(inner)
             alpha = params.alpha
         elif strategy_name == "level_aware_mix_grid" or args.alpha_csv is not None:
             if args.alpha_csv is None:
                 raise ValueError("level_aware_mix_grid requires --alpha-csv.")
             import pandas as pd
-            df = pd.read_csv(args.alpha_csv)
-            best = df.sort_values("recall_at_10", ascending=False).iloc[0]
+            alpha_csv_local = _resolve_file(args.alpha_csv, exts=(".csv",))
+            df = pd.read_csv(alpha_csv_local)
+            # alpha_search.py writes columns "recall@K" / "ndcg@K" (matching the
+            # TopKAccumulator schema). Prefer recall@10; fall back to ndcg@10.
+            sort_col = next(
+                (c for c in ("recall@10", "ndcg@10", "recall_at_10")
+                 if c in df.columns),
+                None,
+            )
+            if sort_col is None:
+                raise ValueError(
+                    f"Grid CSV {alpha_csv_local} has neither recall@10 nor "
+                    f"ndcg@10; got {list(df.columns)}"
+                )
+            best = df.sort_values(sort_col, ascending=False).iloc[0]
             alpha = [float(best[f"alpha_{i}"]) for i in range(n_levels)]
-            print(f"Grid alpha (best recall@10={best['recall_at_10']:.4f}): {alpha}")
+            print(f"Grid alpha (best {sort_col}={best[sort_col]:.4f}): {alpha}")
         else:
             # level_aware_mix with no explicit alpha — default to 0.5 per level
             alpha = [0.5] * n_levels
@@ -186,48 +286,11 @@ def main() -> None:
 
     dataset_split = args.dataset_split or args.dataset
 
-    # ------------------------------------------------------------------
-    # Build model via shared setup helper (reuses train_decoder.py logic)
-    # ------------------------------------------------------------------
-    # Fall back to standard Amazon architecture constants when no gin config.
-    # These match the default configs/decoder_amazon*.gin values.
-    @gin.configurable
-    def _get_arch(
-        vae_input_dim: int = 768,
-        vae_hidden_dims: list = None,
-        vae_embed_dim: int = 32,
-        vae_n_cat_feats: int = 0,
-        vae_codebook_size: int = 256,
-        vae_n_layers: int = 3,
-        vae_codebook_normalize: bool = False,
-        vae_sim_vq: bool = False,
-        t5_d_model: int = 384,
-        t5_num_heads: int = 6,
-        t5_d_ff: int = 1024,
-        t5_num_layers: int = 4,
-        top_k_for_generation: int = 10,
-        should_add_sep_token: bool = True,
-        batch_size: int = 256,
-    ) -> dict:
-        return {
-            "vae_input_dim": vae_input_dim,
-            "vae_hidden_dims": vae_hidden_dims or [512, 256, 128],
-            "vae_embed_dim": vae_embed_dim,
-            "vae_n_cat_feats": vae_n_cat_feats,
-            "vae_codebook_size": vae_codebook_size,
-            "vae_n_layers": vae_n_layers,
-            "vae_codebook_normalize": vae_codebook_normalize,
-            "vae_sim_vq": vae_sim_vq,
-            "t5_d_model": t5_d_model,
-            "t5_num_heads": t5_num_heads,
-            "t5_d_ff": t5_d_ff,
-            "t5_num_layers": t5_num_layers,
-            "top_k_for_generation": top_k_for_generation,
-            "should_add_sep_token": should_add_sep_token,
-            "batch_size": args.batch_size or batch_size,
-        }
-
-    arch = _get_arch()
+    # Architecture kwargs — query gin (train_mtl.* or train.*) so non-Amazon
+    # datasets (e.g. ML32M with vae_embed_dim=64) reconstruct correctly.
+    from evaluate._arch import get_arch
+    arch = get_arch()
+    arch["batch_size"] = args.batch_size or 256
 
     # Determine dataset enum
     dataset_enum_map = {
@@ -236,6 +299,9 @@ def main() -> None:
         "ml1m": RecDataset.ML_1M, "ml32m": RecDataset.ML_32M,
     }
     dataset_enum = dataset_enum_map.get(args.dataset, RecDataset.AMAZON)
+
+    rqvae_ckpt_local = _resolve_ckpt(args.rqvae_ckpt)
+    decoder_ckpt_local = _resolve_ckpt(args.decoder_ckpt)
 
     setup = _setup_training(
         dataset_folder=args.dataset_folder,
@@ -251,7 +317,7 @@ def main() -> None:
         vae_n_cat_feats=arch["vae_n_cat_feats"],
         vae_codebook_normalize=arch["vae_codebook_normalize"],
         vae_sim_vq=arch["vae_sim_vq"],
-        pretrained_rqvae_path=args.rqvae_ckpt,
+        pretrained_rqvae_path=rqvae_ckpt_local,
         t5_d_model=arch["t5_d_model"],
         t5_num_heads=arch["t5_num_heads"],
         t5_d_ff=arch["t5_d_ff"],
@@ -273,12 +339,12 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Load decoder checkpoint weights
     # ------------------------------------------------------------------
-    ckpt = torch.load(args.decoder_ckpt, map_location="cpu")
+    ckpt = torch.load(decoder_ckpt_local, map_location="cpu")
     model_state = ckpt.get("model", ckpt)
     model.load_state_dict(model_state, strict=False)
     model = model.to(device)
     model.eval()
-    print(f"Loaded decoder from {args.decoder_ckpt} (iter={ckpt.get('iter', '?')})")
+    print(f"Loaded decoder from {decoder_ckpt_local} (iter={ckpt.get('iter', '?')})")
 
     # ------------------------------------------------------------------
     # Load aux head (if present in checkpoint)
@@ -308,12 +374,14 @@ def main() -> None:
     strategy = _build_strategy(args.strategy, args, aux_head, n_levels)
     print(f"Strategy: {args.strategy} → {type(strategy).__name__}")
 
-    if isinstance(strategy, SASRecReranker):
-        raise NotImplementedError(
-            "sasrec_rerank strategy is not currently wired into the eval harness "
-            "(requires decoder hidden-state access). Use level_aware_mix* variants "
-            "for SASRec-augmented decoding."
-        )
+    # SASRecReranker is post-hoc: it runs AFTER a base beam search, not
+    # inside the per-level expand loop. Detect it and switch to the
+    # two-phase path (vanilla generation → rerank with query_hidden).
+    is_post_hoc_rerank = isinstance(strategy, SASRecReranker)
+    if is_post_hoc_rerank:
+        base_strategy = VanillaBeamSearch()
+    else:
+        base_strategy = strategy
 
     # ------------------------------------------------------------------
     # Evaluation loop
@@ -328,12 +396,23 @@ def main() -> None:
                     tokenized,
                     top_k=True,
                     temperature=1,
-                    strategy=strategy,
+                    strategy=base_strategy,
                     codebook_embs=codebook_embs,
+                    return_query_hidden=is_post_hoc_rerank,
                 )
+                if is_post_hoc_rerank:
+                    reranked_beams, _ = strategy.rerank(
+                        beams=generated.sem_ids,
+                        log_probas=generated.log_probas,
+                        codebook_embs=codebook_embs,
+                        decoder_hidden=generated.query_hidden,
+                    )
+                    generated_sem_ids = reranked_beams
+                else:
+                    generated_sem_ids = generated.sem_ids
             target = tokenized.sem_ids_fut[:, :n_levels]
             acc.accumulate(
-                generated_ids=generated.sem_ids,
+                generated_ids=generated_sem_ids,
                 target_ids=target,
             )
 

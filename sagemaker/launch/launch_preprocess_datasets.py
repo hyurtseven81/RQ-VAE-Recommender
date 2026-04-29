@@ -3,7 +3,7 @@
 The job runs Sentence-T5 text embedding for the selected splits, writes the
 processed .pt files plus raw data into SM_MODEL_DIR, and SageMaker packs them
 into model.tar.gz. A second pass in this launcher (``--sync``) can then be
-used to extract that tarball into s3://REDACTED-BUCKET/rqvae-level-aware/datasets/amazon/
+used to extract that tarball into $RQVAE_S3_BASE/datasets/amazon/
 so downstream jobs can mount it as a dataset channel and skip preprocessing.
 
 Usage::
@@ -21,30 +21,29 @@ import tarfile
 from datetime import datetime, timezone
 
 import boto3
-import sagemaker
+from _aws_env import aws_profile, aws_region, s3_base, s3_bucket, sagemaker_role
 from sagemaker.pytorch import PyTorch
 
+import sagemaker
 
-S3_BASE = "s3://REDACTED-BUCKET/rqvae-level-aware"
-BUCKET = "REDACTED-BUCKET"
 S3_DATASETS_PREFIX_ROOT = "rqvae-level-aware/datasets"
 
 
 def launch(splits: str, instance_type: str) -> str:
-    boto_sess = boto3.Session(profile_name="REDACTED-PROFILE", region_name="us-east-1")
+    boto_sess = boto3.Session(profile_name=aws_profile(), region_name=aws_region())
     sess = sagemaker.Session(boto_session=boto_sess)
 
     job_name = f"preprocess-amazon-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
     estimator = PyTorch(
         entry_point="sagemaker/preprocess_datasets_entry.py",
         source_dir=".",
-        role="arn:aws:iam::000000000000:role/REDACTED-ROLE",
+        role=sagemaker_role(),
         instance_type=instance_type,
         instance_count=1,
         framework_version="2.5.1",
         py_version="py311",
         sagemaker_session=sess,
-        output_path=f"{S3_BASE}/preprocess-datasets/",
+        output_path=f"{s3_base()}/preprocess-datasets/",
         use_spot_instances=False,
         max_run=7200,
         hyperparameters={"splits": splits},
@@ -56,17 +55,17 @@ def launch(splits: str, instance_type: str) -> str:
     )
     estimator.fit(job_name=job_name, wait=False, logs=False)
     print(f"Launched: {job_name}")
-    print(f"Monitor via SageMaker console or:")
-    print(f"  aws sagemaker describe-training-job --training-job-name {job_name} --profile REDACTED-PROFILE")
-    print(f"Once Completed, run:")
+    print("Monitor via SageMaker console or:")
+    print(f"  aws sagemaker describe-training-job --training-job-name {job_name} --profile $RQVAE_AWS_PROFILE")
+    print("Once Completed, run:")
     print(f"  python sagemaker/launch/launch_preprocess_datasets.py --sync {job_name}")
     return job_name
 
 
 def sync(job_name: str) -> None:
     """Stream the model.tar.gz for the completed job and upload each entry to
-    s3://REDACTED-BUCKET/rqvae-level-aware/datasets/amazon/{processed,raw}/..."""
-    boto_sess = boto3.Session(profile_name="REDACTED-PROFILE", region_name="us-east-1")
+    $RQVAE_S3_BASE/datasets/amazon/{processed,raw}/..."""
+    boto_sess = boto3.Session(profile_name=aws_profile(), region_name=aws_region())
     s3 = boto_sess.client("s3")
     sm = boto_sess.client("sagemaker")
 
@@ -87,25 +86,26 @@ def sync(job_name: str) -> None:
         for member in tf:
             if not member.isfile():
                 continue
-            # Tarball entries look like "amazon/processed/data_beauty.pt" or
-            # "steam/processed/data_steam.pt". Route each to the corresponding
-            # datasets/<dataset>/ prefix.
+            # Tarball entries look like "amazon/processed/data_beauty.pt",
+            # "steam/processed/data_steam.pt", or
+            # "ml-32m/processed/data_ml-32m.pt". Route each to the
+            # corresponding datasets/<dataset>/ prefix.
             rel = member.name.removeprefix("./")
             parts = rel.split("/", 1)
             if len(parts) < 2:
                 continue
             ds, sub = parts
-            if ds not in ("amazon", "steam"):
+            if ds not in ("amazon", "steam", "ml-32m"):
                 continue
             s3_key = f"{S3_DATASETS_PREFIX_ROOT}/{ds}/{sub}"
             data = tf.extractfile(member)
             if data is None:
                 continue
-            s3.upload_fileobj(data, BUCKET, s3_key)
+            s3.upload_fileobj(data, s3_bucket(), s3_key)
             uploaded += 1
             if uploaded % 10 == 0:
                 print(f"  uploaded {uploaded} files...")
-    print(f"Done. Uploaded {uploaded} files to s3://{BUCKET}/{S3_DATASETS_PREFIX_ROOT}/")
+    print(f"Done. Uploaded {uploaded} files to s3://{s3_bucket()}/{S3_DATASETS_PREFIX_ROOT}/")
 
 
 def main() -> None:

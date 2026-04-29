@@ -5,3 +5,7 @@ wandb
 trained_models/
 tl_out
 .venv/
+.env
+.envrc
+docs/progress_log.md
+docs/paper_plan_stage0_report.md
