@@ -738,6 +738,25 @@ Do **not** relaunch the failing harness or any alpha grid until the
 matrix points at a specific code site. Do not edit configs or code
 without explicit instruction from the operator.
 
+If Row 2 fires (`MTL+vanilla=0` while `Baseline+vanilla>0`) walk down
+this ladder before declaring the ckpt "broken":
+
+1. `python scripts/diag_mtl_ckpt.py <broken-mtl.tar.gz> <known-good-mtl.tar.gz>`
+   — diff state_dict structure. If prefix sets and shapes are identical,
+   the save format is fine and the bug isn't a missing/renamed key.
+2. CloudWatch tail of the MTL training job: pull every `full_eval`
+   recall@10 line and check whether train-time eval was healthy
+   throughout. If it stayed near baseline (e.g. ~0.04 for beauty)
+   while offline eval gives 0.0, the ckpt converged **at train time**
+   but the eval harness is reading a different SID table.
+3. `python scripts/diag_corpus_ids.py --decoder-ckpt <broken-mtl> --rqvae-ckpt <same-rqvae> --gin-config <mtl-gin> --dataset <name>`
+   — compares the train-time `_orig_mod.codebooks` buffer against
+   `tokenizer.precompute_corpus_ids(item_dataset)` recomputed at eval
+   time. A mismatch row-rate above ~0.1% means the SID table has
+   drifted between train and eval (different RQ-VAE ckpt, different
+   processed cache, different dataset_split, etc.) and that's the
+   actual root cause — not the decoder weights.
+
 How to stop a job (for any of the "stop, relaunch" cases above):
 
 ```bash
