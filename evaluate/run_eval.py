@@ -346,6 +346,12 @@ def main() -> None:
     model.eval()
     print(f"Loaded decoder from {decoder_ckpt_local} (iter={ckpt.get('iter', '?')})")
 
+    # Hard invariant: train-time codebooks (just loaded into model.codebooks)
+    # must equal the freshly recomputed eval-time SID table. If not, every
+    # held-out target will miss and recall@K will be identically zero.
+    from evaluate._invariants import assert_corpus_ids_match
+    assert_corpus_ids_match(model, tokenizer, n_levels)
+
     # ------------------------------------------------------------------
     # Load aux head (if present in checkpoint)
     # ------------------------------------------------------------------

@@ -178,6 +178,12 @@ def main() -> None:
     model.eval()
     print(f"Loaded decoder from {decoder_ckpt_local} (iter={ckpt.get('iter', '?')})")
 
+    # Hard invariant: train-time codebooks (just loaded into model.codebooks)
+    # must equal the freshly recomputed eval-time SID table. If not, every
+    # held-out target will miss and recall@K will be identically zero.
+    from evaluate._invariants import assert_corpus_ids_match, smoke_test_zero_alpha
+    assert_corpus_ids_match(model, tokenizer, n_levels)
+
     aux_head: SASRecAuxHead | None = None
     if "aux_head" in ckpt:
         num_items = len(setup["item_dataset"])
@@ -203,6 +209,19 @@ def main() -> None:
 
     alpha_grid = _alpha_combinations(args, n_levels)
     print(f"Alpha grid: {len(alpha_grid)} schedule(s)")
+
+    # Bypass-invariant smoke test: α=[0]*n_levels must equal vanilla beam
+    # search per the AGENTS.md invariant. If recall is zero across a few
+    # batches, the full grid will be too — abort before burning compute.
+    smoke_test_zero_alpha(
+        model=model,
+        tokenizer=tokenizer,
+        eval_dataloader=eval_dataloader,
+        aux_head=aux_head,
+        codebook_embs=codebook_embs,
+        device=device,
+        n_levels=n_levels,
+    )
 
     # --- Evaluate each alpha schedule ---
     output_csv = _resolve_output_csv(args.output, args.job_name)
