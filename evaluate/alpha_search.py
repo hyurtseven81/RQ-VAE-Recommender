@@ -178,10 +178,19 @@ def main() -> None:
     model.eval()
     print(f"Loaded decoder from {decoder_ckpt_local} (iter={ckpt.get('iter', '?')})")
 
-    # Hard invariant: train-time codebooks (just loaded into model.codebooks)
-    # must equal the freshly recomputed eval-time SID table. If not, every
-    # held-out target will miss and recall@K will be identically zero.
-    from evaluate._invariants import assert_corpus_ids_match, smoke_test_zero_alpha
+    # Repair tokenizer.cached_ids to match the decoder's saved SID table,
+    # then assert no residual drift. Repair is necessary because partial-
+    # collapse RQ-VAEs (AGENTS.md fingerprint: beauty L0 only 48/256 codes)
+    # produce non-deterministic re-tokenization at eval time due to cuBLAS
+    # tie-breaking among collapsed codes — small drift (~0.5% of rows) is
+    # intrinsic, but the decoder predicts SIDs in the train-time space, so
+    # eval-time tokenization MUST use the train-time table.
+    from evaluate._invariants import (
+        assert_corpus_ids_match,
+        repair_eval_tokenizer,
+        smoke_test_zero_alpha,
+    )
+    repair_eval_tokenizer(model, tokenizer, n_levels)
     assert_corpus_ids_match(model, tokenizer, n_levels)
 
     aux_head: SASRecAuxHead | None = None

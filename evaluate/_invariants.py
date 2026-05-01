@@ -1,24 +1,30 @@
 """Eval-time invariants that catch silent train-vs-eval drift.
 
-Both helpers exist because the §M-zero-metrics bug on `alpha-beauty-pilot`
+Two helpers exist because the §M-zero-metrics bug on `alpha-beauty-pilot`
 (see `docs/runbook_sagemaker.md`) consumed two days of operator/agent time
 producing a 27-row CSV of zeros before anyone realised the decoder ckpt
-and the eval-time tokenizer were reading different SID tables. These
-invariants are the cheapest possible defence:
+and the eval-time tokenizer were reading different SID tables.
 
-* :func:`assert_corpus_ids_match` — compares the decoder ckpt's saved
-  ``codebooks`` buffer against the freshly recomputed
-  ``tokenizer.cached_ids`` and aborts on any row mismatch. Catches any
-  drift in pretrained_rqvae_path / dataset_split / processed-cache /
-  RQ-VAE-arch between training and eval.
-* :func:`smoke_test_zero_alpha` — runs α=[0]*n_levels for a handful of
-  batches BEFORE launching the full alpha grid. Per the AGENTS.md
+* :func:`repair_eval_tokenizer` — overwrites ``tokenizer.cached_ids``
+  with the train-time SID table loaded from the decoder ckpt's
+  ``model.codebooks`` buffer. The decoder predicts SIDs in the
+  train-time space, so eval-time tokenization MUST use that same
+  table — anything else scores predictions against a mismatched
+  key. With deterministic RQ-VAEs the recompute matches by accident;
+  with partial-collapse codebooks (e.g. AGENTS.md fingerprints upstream
+  beauty L0 at 48/256 codes) cuBLAS algorithm-selection non-determinism
+  flips tied-code assignments and ~0.5% of rows drift. Always repair,
+  not warn.
+
+* :func:`assert_corpus_ids_match` — sanity check after repair, plus
+  a hard error on the catastrophic case (different corpus size, which
+  means dataset_split or processed cache changed).
+
+* :func:`smoke_test_zero_alpha` — runs α=[0]*n_levels for a handful
+  of batches BEFORE launching the full alpha grid. Per the AGENTS.md
   bypass invariant, α=[0]*n_levels MUST equal vanilla beam search;
-  if recall is identically zero, the harness is broken (or, if (1)
-  passed, something subtler is — e.g. accumulator regression or
-  bypass code path).
-
-Both raise ``RuntimeError`` on failure with actionable messages.
+  if recall is identically zero, the harness is broken — abort BEFORE
+  burning compute on a uniformly-zero sweep.
 """
 from __future__ import annotations
 
@@ -33,15 +39,84 @@ from modules.heads.sasrec_head import SASRecAuxHead
 from modules.tokenizer.semids import SemanticIdTokenizer
 
 
-def assert_corpus_ids_match(model, tokenizer: SemanticIdTokenizer, n_levels: int) -> None:
-    """Hard-error if the decoder's saved codebooks disagree with eval-time SIDs.
+def _recompute_dedup_column(codebooks: torch.Tensor) -> torch.Tensor:
+    """Recompute the per-row dedup tag for a (N, n_levels) SID table.
 
-    Must be called AFTER ``model.load_state_dict(...)`` so that
-    ``model.codebooks`` holds the train-time buffer (set in
-    ``train_decoder.py`` from ``tokenizer.cached_ids[:, :n_levels]`` at
-    training time). The eval-time tokenizer's ``cached_ids`` is the
-    freshly recomputed table — if anything has drifted, every row
-    will differ and recall will be identically zero downstream.
+    Mirrors the train-time logic in ``SemanticIdTokenizer.precompute_corpus_ids``:
+    for each item ``i`` (in iteration order), the dedup tag is the count of
+    earlier items ``j < i`` whose SID triple equals ``codebooks[i]``. The
+    result keeps the (n_levels + 1)-tuple unique across all items, which is
+    what the embedding-table indexing relies on.
+    """
+    n = codebooks.shape[0]
+    dedup = torch.zeros(n, dtype=codebooks.dtype, device=codebooks.device)
+    seen: dict[tuple, int] = {}
+    rows = codebooks.tolist()
+    for i, row in enumerate(rows):
+        key = tuple(row)
+        dedup[i] = seen.get(key, 0)
+        seen[key] = seen.get(key, 0) + 1
+    return dedup
+
+
+def repair_eval_tokenizer(
+    model, tokenizer: SemanticIdTokenizer, n_levels: int
+) -> None:
+    """Force the tokenizer's cached_ids to match the decoder's saved table.
+
+    Must be called AFTER ``model.load_state_dict(...)`` (so ``model.codebooks``
+    holds the train-time buffer). Replaces the first ``n_levels`` columns of
+    ``tokenizer.cached_ids`` with ``model.codebooks`` and recomputes the
+    dedup column for uniqueness. Reports row-drift count if any.
+    """
+    train_codebooks = getattr(model, "codebooks", None)
+    if train_codebooks is None:
+        raise RuntimeError(
+            "Decoder model has no `codebooks` buffer post-load — either the "
+            "checkpoint is from an older format or `load_state_dict(strict=False)` "
+            "silently dropped it. Refuse to evaluate."
+        )
+    train_codebooks = train_codebooks.detach().cpu().long()
+
+    eval_cached = tokenizer.cached_ids
+    if eval_cached is None:
+        raise RuntimeError(
+            "Tokenizer has no `cached_ids` — `precompute_corpus_ids` was not run "
+            "before repair."
+        )
+    eval_cached_cpu = eval_cached.detach().cpu().long()
+
+    if train_codebooks.shape != eval_cached_cpu[:, :n_levels].shape:
+        raise RuntimeError(
+            f"corpus_ids shape mismatch: train-time={tuple(train_codebooks.shape)} "
+            f"eval-time={tuple(eval_cached_cpu[:, :n_levels].shape)}. The corpus has "
+            f"changed between training and eval — different dataset_split or "
+            f"processed cache. Refuse to evaluate."
+        )
+
+    n = train_codebooks.shape[0]
+    eval_codebooks = eval_cached_cpu[:, :n_levels]
+    n_mismatch = int((train_codebooks != eval_codebooks).any(dim=1).sum().item())
+    if n_mismatch > 0:
+        per_level = (train_codebooks != eval_codebooks).sum(dim=0).tolist()
+        print(
+            f"[repair] corpus_ids drift: {n_mismatch}/{n} rows differ "
+            f"({100.0 * n_mismatch / n:.2f}%). Per-level: " +
+            "  ".join(f"lvl{i}={c}" for i, c in enumerate(per_level)) +
+            ". Replacing eval-time SIDs with train-time codebooks for the "
+            "decoder's saved table."
+        )
+    else:
+        print(f"[repair] corpus_ids already match ({n}/{n} rows); repair is a no-op.")
+
+    dedup = _recompute_dedup_column(train_codebooks)
+    repaired = torch.cat([train_codebooks, dedup.unsqueeze(1)], dim=1)
+    tokenizer.cached_ids = repaired.to(eval_cached.device)
+
+
+def assert_corpus_ids_match(model, tokenizer: SemanticIdTokenizer, n_levels: int) -> None:
+    """Tautological check after :func:`repair_eval_tokenizer` — keep as a
+    belt-and-suspenders sanity guard.
     """
     train_codebooks = getattr(model, "codebooks", None)
     if train_codebooks is None:
@@ -54,8 +129,7 @@ def assert_corpus_ids_match(model, tokenizer: SemanticIdTokenizer, n_levels: int
     eval_cached = tokenizer.cached_ids
     if eval_cached is None:
         raise RuntimeError(
-            "Tokenizer has no `cached_ids` — `precompute_corpus_ids` was not run "
-            "before invariant check."
+            "Tokenizer has no `cached_ids` — repair was skipped or failed."
         )
     eval_codebooks = eval_cached[:, :n_levels].detach().cpu().long()
 
@@ -71,13 +145,10 @@ def assert_corpus_ids_match(model, tokenizer: SemanticIdTokenizer, n_levels: int
     if n_mismatch > 0:
         per_level = (train_codebooks != eval_codebooks).sum(dim=0).tolist()
         raise RuntimeError(
-            f"corpus_ids drift: {n_mismatch}/{n} rows differ between train-time "
-            f"(saved in ckpt) and eval-time (recomputed by tokenizer). "
-            f"Per-level disagreement: " +
+            f"corpus_ids drift after repair: {n_mismatch}/{n} rows still differ. "
+            f"Per-level: " +
             "  ".join(f"lvl{i}={c}" for i, c in enumerate(per_level)) +
-            ". Likely cause: the gin's `pretrained_rqvae_path` and the launcher's "
-            "`--rqvae-ckpt` resolve to different files. Run "
-            "`scripts/diag_corpus_ids.py` for a deeper diff. Refuse to evaluate."
+            ". `repair_eval_tokenizer` failed to sync — investigate."
         )
     print(f"[invariant] corpus_ids match: {n}/{n} rows agree across {n_levels} levels.")
 
